@@ -1,0 +1,42 @@
+# aw-watcher-ax config template.
+# Copy this file to ~/.config/aw-watcher-ax/config.toml and edit as needed.
+# install.sh does this automatically on first run.
+
+# How often to poll the focused app (seconds). Lower = more accurate, higher = less CPU.
+poll_interval_sec = 60
+
+# Heartbeat merge window (seconds). Successive events with the same (app, context)
+# emitted within this window are merged server-side by ActivityWatch into a single
+# longer event. Should be >= 2 * poll_interval_sec.
+pulsetime_sec = 180
+
+# ActivityWatch server. Override only if you run AW on a non-default host/port.
+aw_base_url = "http://localhost:5600"
+
+# Apps to monitor. For each entry, aw-watcher-ax reads the active context
+# (conversation, chat, heading, window title) via the macOS Accessibility API.
+#
+# Fields:
+#   bundle_id  – macOS bundle identifier. Find yours with:
+#                  osascript -e 'id of app "AppName"'
+#   name       – display name to write into AW events (shown as `data.app`)
+#   strategy   – extraction strategy:
+#                  "auto"         (default) – use built-in extractor if available,
+#                                 else fall through to heading -> window_title
+#                  "heading"      – first AXHeading in focused window (chat apps)
+#                  "window_title" – AXTitle of focused window (IDEs, browsers)
+
+[[apps]]
+bundle_id = "com.anthropic.claudefordesktop"
+name = "Claude"
+# strategy = "auto"  – auto path falls through to heading, which reads the active conversation title
+
+[[apps]]
+bundle_id = "ru.keepcoder.Telegram"
+name = "Telegram"
+# strategy = "auto"  – built-in extractor reads the active chat name
+
+[[apps]]
+bundle_id = "dev.zed.Zed"
+name = "Zed"
+strategy = "window_title"

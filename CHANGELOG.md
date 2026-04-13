@@ -1,0 +1,24 @@
+# Changelog
+
+All notable changes to this project are documented here. Format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.2.0] - 2026-04-13
+
+### Added
+- Config validation: positive `poll_interval_sec` / `pulsetime_sec`, minimum ratio between them, duplicate `bundle_id` detection, non-empty apps list.
+- CLI: `--version` flag, exit codes (`2` for config errors, `3` for denied Accessibility permission under `--once`).
+- Watcher: exponential-backoff retry around the initial bucket-create request.
+- `.app` bundle wrapper installed into `~/Applications/aw-watcher-ax.app`, ad-hoc codesigned by `install.sh`, so macOS TCC tracks a stable identity instead of a versioned Python interpreter.
+- `LICENSE`, `CHANGELOG.md`.
+
+### Removed
+- Dead `_extract_claude` dispatcher (the `auto` default path already handles Claude Desktop).
+
+## [0.1.0] - 2026-04-13
+
+### Added
+- Initial release: launchd-managed macOS watcher, per-app strategy dispatch (`auto`/`heading`/`window_title`), built-in Telegram extractor, AW heartbeat with server-side `pulsetime` merging.

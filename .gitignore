@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+dist/
+build/
+.worktrees/
+.DS_Store
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Pyenv
+.python-version
+
+# Internal planning notes (not shipped)
+docs/superpowers/
