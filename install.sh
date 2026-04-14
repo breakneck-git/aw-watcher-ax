@@ -7,8 +7,10 @@ CONFIG_DIR="$HOME/.config/aw-watcher-ax"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 CONFIG_TEMPLATE="$INSTALL_DIR/config.toml.example"
 APP_TEMPLATE="$INSTALL_DIR/app_template/aw-watcher-ax.app"
+TRAMPOLINE_SRC="$INSTALL_DIR/app_template/trampoline.c"
 APP_DIR="$HOME/Applications/aw-watcher-ax.app"
 APP_BIN="$APP_DIR/Contents/MacOS/aw-watcher-ax"
+APP_TARGET_FILE="$APP_DIR/Contents/Resources/launcher-target"
 
 OS="$(uname -s)"
 
@@ -45,11 +47,29 @@ if [ ! -f "$CONFIG_FILE" ]; then
     echo "   Edit it to add/remove apps to monitor."
 fi
 
+if ! command -v clang >/dev/null 2>&1; then
+    echo "Error: clang not found. Install Xcode Command Line Tools:"
+    echo "  xcode-select --install"
+    exit 1
+fi
+
 echo "Installing app bundle to $APP_DIR..."
 mkdir -p "$HOME/Applications"
 rm -rf "$APP_DIR"
 cp -R "$APP_TEMPLATE" "$APP_DIR"
-sed -i '' "s|__BIN_PATH__|$VENV_DIR/bin/aw-watcher-ax|g" "$APP_BIN"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+rm -f "$APP_DIR/Contents/MacOS/.gitkeep" "$APP_DIR/Contents/Resources/.gitkeep"
+
+# Record the venv launcher path for the trampoline to read at runtime.
+printf '%s\n' "$VENV_DIR/bin/aw-watcher-ax" > "$APP_TARGET_FILE"
+
+# Compile the Mach-O trampoline. ld64 defaults to a content-hash LC_UUID,
+# so identical source + toolchain yield a bit-identical binary across
+# reinstalls. That keeps the .app bundle's cdhash stable and preserves
+# the user's Accessibility grant. We intentionally do NOT pass -no_uuid:
+# modern dyld refuses to load Mach-O binaries missing LC_UUID.
+echo "Compiling launcher trampoline..."
+clang -O2 -Wall -o "$APP_BIN" "$TRAMPOLINE_SRC"
 chmod +x "$APP_BIN"
 
 echo "Ad-hoc codesigning app bundle..."

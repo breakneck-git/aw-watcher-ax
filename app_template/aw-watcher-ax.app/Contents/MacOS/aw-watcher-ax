@@ -1,6 +1,0 @@
-#!/bin/bash
-# Wrapper executable for the aw-watcher-ax.app bundle.
-# install.sh replaces __BIN_PATH__ with the absolute path to the venv launcher.
-# The .app bundle exists so macOS TCC (Accessibility) tracks a stable identity
-# instead of a versioned python interpreter.
-exec "__BIN_PATH__" "$@"

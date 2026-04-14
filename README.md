@@ -6,7 +6,7 @@ Built-in extractor for Claude Desktop. Other apps work via the default `auto` st
 
 ## Install
 
-Requires Python 3.11+ on macOS.
+Requires Python 3.11+ and Xcode Command Line Tools (for `clang`) on macOS.
 
 ```bash
 ./install.sh
@@ -15,7 +15,7 @@ Requires Python 3.11+ on macOS.
 This will:
 
 1. Create a venv in `.venv/` and install the package into it.
-2. Copy the `.app` bundle template to `~/Applications/aw-watcher-ax.app`, patch the launcher to point at the venv, and ad-hoc codesign it.
+2. Copy the `.app` bundle template to `~/Applications/aw-watcher-ax.app`, compile a small C trampoline as `Contents/MacOS/aw-watcher-ax`, record the venv launcher path in `Contents/Resources/launcher-target`, and ad-hoc codesign the bundle.
 3. Drop `config.toml` at `~/.config/aw-watcher-ax/config.toml` from the template.
 4. Install and load a launchd agent at `~/Library/LaunchAgents/com.aw-watcher-ax.plist`.
 
