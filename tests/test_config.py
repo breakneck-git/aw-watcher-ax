@@ -285,3 +285,35 @@ def test_rejects_non_string_name(tmp_path: Path) -> None:
         """,
             )
         )
+
+
+def test_rejects_invalid_aw_base_url(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="aw_base_url"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            aw_base_url = "garbage"
+
+            [[apps]]
+            bundle_id = "dev.zed.Zed"
+            name = "Zed"
+        """,
+            )
+        )
+
+
+def test_accepts_https_aw_base_url(tmp_path: Path) -> None:
+    cfg = load_config(
+        _write(
+            tmp_path,
+            """
+        aw_base_url = "https://example.com:5600"
+
+        [[apps]]
+        bundle_id = "dev.zed.Zed"
+        name = "Zed"
+    """,
+        )
+    )
+    assert cfg.aw_base_url == "https://example.com:5600"

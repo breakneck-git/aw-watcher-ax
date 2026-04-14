@@ -78,9 +78,15 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
             f"successive heartbeats into a single event"
         )
 
+    aw_base_url = data.get("aw_base_url", "http://localhost:5600")
+    if not isinstance(aw_base_url, str) or not (
+        aw_base_url.startswith("http://") or aw_base_url.startswith("https://")
+    ):
+        raise ValueError(f"aw_base_url must start with http:// or https://, got {aw_base_url!r}")
+
     return Config(
         poll_interval_sec=poll_interval_sec,
         pulsetime_sec=pulsetime_sec,
-        aw_base_url=data.get("aw_base_url", "http://localhost:5600"),
+        aw_base_url=aw_base_url,
         apps=apps,
     )
