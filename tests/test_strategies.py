@@ -40,6 +40,7 @@ def _fake_ax_walk(elem: Any, *, role: str | None = None, max_depth: int = 10):
 def _patch_ax(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(strategies, "ax_get", _fake_ax_get)
     monkeypatch.setattr(strategies, "ax_walk", _fake_ax_walk)
+    monkeypatch.setattr(strategies, "ax_set", lambda _el, _attr, _val: 0)
     monkeypatch.setattr(strategies, "create_app_element", lambda _pid: _APP_EL)
 
 
@@ -151,9 +152,12 @@ def test_heading_skips_when_matches_app_name() -> None:
 # ---------- auto strategy dispatch ----------
 
 
-def test_auto_for_claude_uses_heading_fallback() -> None:
-    win = FakeElement({}, children=[FakeElement({"AXRole": "AXHeading", "AXTitle": "Cool chat"})])
-    app = FakeElement({"AXFocusedWindow": win})
+def test_auto_for_claude_uses_claude_builtin() -> None:
+    title_btn = FakeElement({"AXRole": "AXButton", "AXTitle": "rpi2b"})
+    session_popup = FakeElement({"AXRole": "AXPopUpButton", "AXDescription": "Session options"})
+    toolbar = FakeElement({"AXRole": "AXGroup"}, children=[title_btn, session_popup])
+    win = FakeElement({}, children=[toolbar])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
     _set_app(app)
 
     cfg = AppConfig(
@@ -161,7 +165,7 @@ def test_auto_for_claude_uses_heading_fallback() -> None:
         name="Claude",
         strategy="auto",
     )
-    assert strategies.extract_context(cfg, pid=0) == "Cool chat"
+    assert strategies.extract_context(cfg, pid=0) == "rpi2b"
 
 
 def test_auto_falls_through_heading_then_window_title() -> None:
@@ -182,27 +186,38 @@ def test_auto_returns_none_when_nothing_useful() -> None:
     assert strategies.extract_context(cfg, pid=0) is None
 
 
-# ---------- telegram built-in ----------
+# ---------- claude built-in ----------
 
 
-def test_telegram_picks_selected_row_description() -> None:
-    row_other = FakeElement({"AXRole": "AXRow", "AXSelected": False, "AXDescription": "Mom"})
-    row_selected = FakeElement(
-        {"AXRole": "AXRow", "AXSelected": True, "AXDescription": "Project channel"}
+def test_claude_returns_none_without_session_options_anchor() -> None:
+    btn = FakeElement({"AXRole": "AXButton", "AXTitle": "Some button"})
+    win = FakeElement({}, children=[btn])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
     )
-    win = FakeElement({}, children=[row_other, row_selected])
-    app = FakeElement({"AXFocusedWindow": win})
-    _set_app(app)
-
-    cfg = AppConfig(bundle_id="ru.keepcoder.Telegram", name="Telegram", strategy="auto")
-    assert strategies.extract_context(cfg, pid=0) == "Project channel"
-
-
-def test_telegram_none_when_no_selected_row() -> None:
-    row = FakeElement({"AXRole": "AXRow", "AXSelected": False, "AXDescription": "Mom"})
-    win = FakeElement({}, children=[row])
-    app = FakeElement({"AXFocusedWindow": win})
-    _set_app(app)
-
-    cfg = AppConfig(bundle_id="ru.keepcoder.Telegram", name="Telegram", strategy="auto")
     assert strategies.extract_context(cfg, pid=0) is None
+
+
+def test_claude_skips_preceding_untitled_buttons() -> None:
+    # User-menu popup before the chat title, then the title, then the anchor
+    menu = FakeElement({"AXRole": "AXPopUpButton", "AXDescription": "Kirill, Settings"})
+    title_btn = FakeElement({"AXRole": "AXButton", "AXTitle": "project chat"})
+    session_popup = FakeElement({"AXRole": "AXPopUpButton", "AXDescription": "Session options"})
+    # A trailing Preview button (must not leak into the result)
+    preview = FakeElement({"AXRole": "AXButton", "AXTitle": "Preview"})
+    toolbar = FakeElement({"AXRole": "AXGroup"}, children=[menu, title_btn, session_popup, preview])
+    win = FakeElement({}, children=[toolbar])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
+    )
+    assert strategies.extract_context(cfg, pid=0) == "project chat"

@@ -69,6 +69,23 @@ def ax_get(elem: Any, attr: str) -> Any:
     return value
 
 
+def ax_set(elem: Any, attr: str, value: Any) -> int:
+    """Set an AX attribute on `elem`, returning the raw AXError code.
+
+    This is used to flip `AXManualAccessibility=True` on Electron/Chromium
+    apps so they build their accessibility tree on demand. Native macOS apps
+    reject the attribute (non-zero error) and callers ignore the return
+    value - the call is effectively a no-op on non-Chromium apps.
+    """
+    try:
+        from ApplicationServices import (  # type: ignore[import-not-found]
+            AXUIElementSetAttributeValue,
+        )
+    except ImportError as e:
+        raise RuntimeError(_MACOS_ONLY) from e
+    return AXUIElementSetAttributeValue(elem, attr, value)
+
+
 def ax_walk(elem: Any, *, role: str | None = None, max_depth: int = 10) -> Iterator[Any]:
     """Depth-first walk over an AX element tree, yielding matching elements.
 

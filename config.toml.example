@@ -29,12 +29,7 @@ aw_base_url = "http://localhost:5600"
 [[apps]]
 bundle_id = "com.anthropic.claudefordesktop"
 name = "Claude"
-# strategy = "auto"  – auto path falls through to heading, which reads the active conversation title
-
-[[apps]]
-bundle_id = "ru.keepcoder.Telegram"
-name = "Telegram"
-# strategy = "auto"  – built-in extractor reads the active chat name
+# strategy = "auto"  – built-in extractor reads the active conversation title
 
 [[apps]]
 bundle_id = "dev.zed.Zed"

@@ -1,8 +1,8 @@
 # aw-watcher-ax
 
-[ActivityWatch](https://activitywatch.net/) watcher for macOS. Polls the focused app and uses the Accessibility API to capture the active *context* — the conversation title in Claude Desktop, the selected chat in Telegram, the window title in your IDE — and emits it as a heartbeat to your local AW server.
+[ActivityWatch](https://activitywatch.net/) watcher for macOS. Polls the focused app and uses the Accessibility API to capture the active *context* — the conversation title in Claude Desktop, the window title in your IDE — and emits it as a heartbeat to your local AW server.
 
-Built-in extractor for Telegram. Claude Desktop and most other chat apps work via the default `auto` strategy, which falls back through `heading` → `window_title`.
+Built-in extractor for Claude Desktop. Other apps work via the default `auto` strategy, which falls back through `heading` → `window_title`.
 
 ## Install
 
