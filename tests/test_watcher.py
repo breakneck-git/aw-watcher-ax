@@ -161,3 +161,47 @@ def test_ensure_bucket_with_retry_gives_up_after_max_attempts(
         watcher._ensure_bucket_with_retry("http://x", "bucket", max_attempts=3)
 
     assert mock_requests.post.call_count == 3
+
+
+def test_wait_for_permission_daemon_mode_polls_until_granted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results = iter([False, False, True])
+
+    def check(*, prompt: bool) -> bool:
+        return next(results)
+
+    monkeypatch.setattr(watcher, "check_accessibility_permission", check)
+
+    sleeps: list[float] = []
+    fake_time = MagicMock()
+    fake_time.sleep = lambda s: sleeps.append(s)
+    monkeypatch.setattr(watcher, "time", fake_time)
+
+    assert watcher._wait_for_permission(once=False) is True
+    assert sleeps == [watcher._PERMISSION_RETRY_SEC]
+
+
+def test_daemon_loop_swallows_exception_and_continues_polling(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config, requests_mock: MagicMock
+) -> None:
+    calls = {"n": 0}
+
+    def flaky_poll(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient failure")
+        if calls["n"] == 2:
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(watcher, "_poll_once", flaky_poll)
+
+    fake_time = MagicMock()
+    fake_time.sleep = lambda _s: None
+    monkeypatch.setattr(watcher, "time", fake_time)
+
+    with pytest.raises(KeyboardInterrupt):
+        watcher.run(cfg, once=False)
+
+    assert calls["n"] == 3

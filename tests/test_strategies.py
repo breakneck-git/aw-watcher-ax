@@ -221,3 +221,45 @@ def test_claude_skips_preceding_untitled_buttons() -> None:
         strategy="auto",
     )
     assert strategies.extract_context(cfg, pid=0) == "project chat"
+
+
+def test_claude_returns_none_when_anchor_has_only_empty_buttons() -> None:
+    btn1 = FakeElement({"AXRole": "AXButton", "AXTitle": None})
+    btn2 = FakeElement({"AXRole": "AXButton", "AXTitle": ""})
+    btn3 = FakeElement({"AXRole": "AXButton", "AXTitle": "   "})
+    session_popup = FakeElement({"AXRole": "AXPopUpButton", "AXDescription": "Session options"})
+    toolbar = FakeElement({"AXRole": "AXGroup"}, children=[btn1, btn2, btn3, session_popup])
+    win = FakeElement({}, children=[toolbar])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
+    )
+    assert strategies.extract_context(cfg, pid=0) is None
+
+
+# ---------- AXManualAccessibility flip ----------
+
+
+def test_extract_context_flips_axmanualaccessibility_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, str, Any]] = []
+
+    def spy(elem: Any, attr: str, value: Any) -> int:
+        calls.append((elem, attr, value))
+        return 0
+
+    monkeypatch.setattr(strategies, "ax_set", spy)
+
+    win = FakeElement({"AXTitle": "Some doc"})
+    app = FakeElement({"AXFocusedWindow": win})
+    _set_app(app)
+
+    cfg = AppConfig(bundle_id="unknown.app", name="Unknown", strategy="window_title")
+    strategies.extract_context(cfg, pid=0)
+
+    assert calls == [(app, "AXManualAccessibility", True)]

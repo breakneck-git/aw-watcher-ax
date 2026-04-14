@@ -66,3 +66,11 @@ def test_main_version_flag_prints_version(capsys: pytest.CaptureFixture[str]) ->
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "0.2.0" in (captured.out + captured.err)
+
+
+def test_main_returns_0_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch, valid_cfg: Config
+) -> None:
+    monkeypatch.setattr(cli, "load_config", lambda: valid_cfg)
+    monkeypatch.setattr(cli, "run", MagicMock(side_effect=KeyboardInterrupt))
+    assert cli.main([]) == 0
