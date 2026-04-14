@@ -11,12 +11,21 @@ TRAMPOLINE_SRC="$INSTALL_DIR/app_template/trampoline.c"
 APP_DIR="$HOME/Applications/aw-watcher-ax.app"
 APP_BIN="$APP_DIR/Contents/MacOS/aw-watcher-ax"
 APP_TARGET_FILE="$APP_DIR/Contents/Resources/launcher-target"
+LOG_DIR="$HOME/Library/Logs/aw-watcher-ax"
+PLIST_SRC="$INSTALL_DIR/com.aw-watcher-ax.plist"
+PLIST_DST="$HOME/Library/LaunchAgents/com.aw-watcher-ax.plist"
 
 OS="$(uname -s)"
 
 if [ "$OS" != "Darwin" ]; then
     echo "aw-watcher-ax is macOS-only (uses the Accessibility API). Nothing to install on $OS."
     exit 0
+fi
+
+# Stop any running instance before we replace the app bundle, so launchd
+# doesn't hold a reference to a half-written binary during the copy/compile.
+if [ -f "$PLIST_DST" ]; then
+    launchctl unload "$PLIST_DST" 2>/dev/null || true
 fi
 
 PYTHON_BIN=""
@@ -75,17 +84,12 @@ chmod +x "$APP_BIN"
 echo "Ad-hoc codesigning app bundle..."
 codesign --force --deep --sign - "$APP_DIR"
 
-LOG_DIR="$HOME/Library/Logs/aw-watcher-ax"
-PLIST_SRC="$INSTALL_DIR/com.aw-watcher-ax.plist"
-PLIST_DST="$HOME/Library/LaunchAgents/com.aw-watcher-ax.plist"
-
 echo "Installing launchd service..."
 mkdir -p "$LOG_DIR"
 sed -e "s|BIN_PATH|$APP_BIN|g" \
     -e "s|LOG_DIR|$LOG_DIR|g" \
     "$PLIST_SRC" > "$PLIST_DST"
 
-launchctl unload "$PLIST_DST" 2>/dev/null || true
 launchctl load "$PLIST_DST"
 
 echo "✓ aw-watcher-ax installed. Polling every 60s."
