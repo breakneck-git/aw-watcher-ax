@@ -116,6 +116,34 @@ def test_once_mode_without_permission_returns_early(
     assert requests_mock.post.call_args_list == []
 
 
+def test_once_mode_reraises_request_exception_from_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config
+) -> None:
+    """Heartbeat failure in --once must not be swallowed to exit 0.
+
+    A smoke test that can't deliver a heartbeat needs to surface the failure
+    so the caller (cli.main) can map it to exit code 4. The daemon loop keeps
+    its swallow-and-continue behavior; this assertion is only for --once.
+    """
+    import requests as real_requests
+
+    def post_side_effect(url: str, **_kwargs):
+        if "/heartbeat" in url:
+            raise real_requests.ConnectionError("AW went away mid-heartbeat")
+        return MagicMock(status_code=200, raise_for_status=MagicMock())
+
+    mock = MagicMock()
+    mock.post.side_effect = post_side_effect
+    monkeypatch.setattr(watcher, "requests", mock)
+    monkeypatch.setattr(
+        watcher, "get_focused_app", lambda: (1234, "com.anthropic.claudefordesktop")
+    )
+    monkeypatch.setattr(watcher, "extract_context", lambda *_a, **_k: "some chat title")
+
+    with pytest.raises(real_requests.ConnectionError):
+        watcher.run(cfg, once=True)
+
+
 def test_ensure_bucket_with_retry_succeeds_after_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

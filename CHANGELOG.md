@@ -6,6 +6,8 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-14
+
 ### Added
 - `ax_utils.ax_set`: wrapper around `AXUIElementSetAttributeValue`.
 - Built-in Claude Desktop extractor that finds the chat title via the `Session options` popup anchor in Claude's Electron AX tree.
@@ -25,6 +27,7 @@ All notable changes to this project are documented here. Format follows
 - `config.py` rejects empty or non-string `bundle_id` and `name` in `[[apps]]` entries. Previously `name = ""` silently flowed into the `data.app` field of every heartbeat and broke downstream matching (e.g. aw-notion note enrichment, which joins ax events to window events by app name).
 - `config.py` rejects `aw_base_url` values that don't start with `http://` or `https://`. Previously a typo or non-URL value silently flowed through to `requests.post()` and surfaced as a confusing `RequestException` at runtime.
 - `install.sh` now unloads any running launchd instance at the top of the script, before the `rm -rf` on the `.app` bundle. Previously the unload happened at the very end, so the old daemon continued running on a (now-unlinked) binary inode while the new files were written in place — a narrow window where launchd held a reference to a half-rebuilt bundle.
+- `--once` mode no longer swallows per-iteration failures. Previously an exception inside `_poll_once` (e.g. `RequestException` from the heartbeat POST) was caught by the daemon-loop error handler, logged, and followed by `return 0` — so a smoke test claimed success while the heartbeat had actually failed. Now the once-mode branch re-raises, letting `cli.main` map `RequestException` to exit code 4 symmetrically with the bucket-create path. Daemon mode still swallows to survive transient AX failures.
 - Regression from 0.2.0: removing the old `_extract_claude` left Claude Desktop with no working extractor, because Electron's AX tree is empty until `AXManualAccessibility` is set and the generic `heading`/`window_title` fallback returned nothing useful.
 - Launchd daemon Accessibility grant was silently ineffective because the bash launcher triggered the kernel's shebang chain (`/bin/bash` → `python3.11`), so TCC ended up tracking the Homebrew Python Mach-O's cdhash instead of the `.app` bundle's. The fork+wait C trampoline keeps our Mach-O alive as launchd's direct child, so python inherits TCC responsibility through the parent chain.
 - `get_focused_app()` returned a stale value in the long-running daemon: `NSWorkspace.frontmostApplication` is driven by window-server distributed notifications, which only get delivered when the current thread's runloop runs. Without a runloop the value latched to whatever was frontmost at daemon start and every subsequent poll returned the same app regardless of actual focus changes. Pumping the runloop for 20 ms before each query drains pending notifications so the result is fresh.

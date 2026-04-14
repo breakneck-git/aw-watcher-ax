@@ -38,7 +38,7 @@ The watcher is a single-threaded poll loop with a deliberately layered separatio
 
 - `cli.py` — argparse entry point. `--once` is the smoke-test mode used throughout `test_watcher.py`.
 - `config.py` — TOML loader. Validates `strategy` against `VALID_STRATEGIES` and rejects entries missing `bundle_id`/`name`.
-- `watcher.py` — the poll loop in `run()`. Ensures the AW bucket exists, then loops `_poll_once` → `sleep(poll_interval_sec)`. Catches and logs every iteration's exceptions so a transient AX failure never kills the daemon.
+- `watcher.py` — the poll loop in `run()`. Ensures the AW bucket exists, then loops `_poll_once` → `sleep(poll_interval_sec)`. Daemon mode catches and logs every iteration's exceptions so a transient AX failure never kills the daemon. `--once` mode re-raises instead, so a smoke-test heartbeat failure can surface as exit code 4 via `cli.main` rather than being swallowed to exit 0.
 - `strategies.py` — per-app context extraction. `extract_context()` is the only public entry point.
 - `ax_utils.py` — thin wrappers around pyobjc's `ApplicationServices` and `AppKit`.
 

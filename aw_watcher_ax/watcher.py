@@ -115,6 +115,11 @@ def run(cfg: Config, *, once: bool = False) -> int:
         try:
             _poll_once(cfg, bucket, apps_by_bundle)
         except Exception as e:
+            if once:
+                # --once is a smoke test. Surface the failure (RequestException
+                # → exit 4 via cli.main, anything else → traceback + exit 1)
+                # instead of returning 0 with only a log line.
+                raise
             log.exception("watcher iteration failed: %s", e)
         if once:
             return 0
