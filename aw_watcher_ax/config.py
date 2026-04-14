@@ -40,6 +40,11 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         if "bundle_id" not in entry or "name" not in entry:
             raise ValueError(f"[[apps]] entry missing bundle_id or name: {entry}")
         bundle_id = entry["bundle_id"]
+        name = entry["name"]
+        if not isinstance(bundle_id, str) or not bundle_id.strip():
+            raise ValueError(f"[[apps]] entry has empty or invalid bundle_id: {entry}")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"[[apps]] entry has empty or invalid name: {entry}")
         if bundle_id in seen:
             raise ValueError(f"duplicate bundle_id in [[apps]]: {bundle_id!r}")
         seen.add(bundle_id)
@@ -52,7 +57,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         apps.append(
             AppConfig(
                 bundle_id=bundle_id,
-                name=entry["name"],
+                name=name,
                 strategy=strategy,
             )
         )

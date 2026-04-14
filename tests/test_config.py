@@ -201,3 +201,87 @@ def test_rejects_duplicate_bundle_id(tmp_path: Path) -> None:
 def test_rejects_empty_apps(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one"):
         load_config(_write(tmp_path, "poll_interval_sec = 60\n"))
+
+
+def test_rejects_empty_bundle_id(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="bundle_id"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            [[apps]]
+            bundle_id = ""
+            name = "Claude"
+        """,
+            )
+        )
+
+
+def test_rejects_whitespace_bundle_id(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="bundle_id"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            [[apps]]
+            bundle_id = "   "
+            name = "Claude"
+        """,
+            )
+        )
+
+
+def test_rejects_empty_name(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="name"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            [[apps]]
+            bundle_id = "com.anthropic.claudefordesktop"
+            name = ""
+        """,
+            )
+        )
+
+
+def test_rejects_whitespace_name(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="name"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            [[apps]]
+            bundle_id = "com.anthropic.claudefordesktop"
+            name = "   "
+        """,
+            )
+        )
+
+
+def test_rejects_non_string_bundle_id(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="bundle_id"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            [[apps]]
+            bundle_id = 123
+            name = "Claude"
+        """,
+            )
+        )
+
+
+def test_rejects_non_string_name(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="name"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            [[apps]]
+            bundle_id = "com.anthropic.claudefordesktop"
+            name = 42
+        """,
+            )
+        )
