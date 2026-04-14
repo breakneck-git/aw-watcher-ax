@@ -74,3 +74,13 @@ def test_main_returns_0_on_keyboard_interrupt(
     monkeypatch.setattr(cli, "load_config", lambda: valid_cfg)
     monkeypatch.setattr(cli, "run", MagicMock(side_effect=KeyboardInterrupt))
     assert cli.main([]) == 0
+
+
+def test_main_returns_4_on_request_exception(
+    monkeypatch: pytest.MonkeyPatch, valid_cfg: Config
+) -> None:
+    import requests as real_requests
+
+    monkeypatch.setattr(cli, "load_config", lambda: valid_cfg)
+    monkeypatch.setattr(cli, "run", MagicMock(side_effect=real_requests.ConnectionError("down")))
+    assert cli.main(["--once"]) == 4

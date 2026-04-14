@@ -1,6 +1,8 @@
 import argparse
 import logging
 
+from requests import RequestException
+
 from . import __version__
 from .config import load_config
 from .watcher import run
@@ -43,3 +45,6 @@ def main(argv: list[str] | None = None) -> int:
         return run(cfg, once=args.once)
     except KeyboardInterrupt:
         return 0
+    except RequestException as e:
+        log.error("ActivityWatch server unreachable at %s: %s", cfg.aw_base_url, e)
+        return 4

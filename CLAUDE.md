@@ -46,7 +46,7 @@ The watcher is a single-threaded poll loop with a deliberately layered separatio
 
 `load_config` rejects: non-positive `poll_interval_sec` / `pulsetime_sec`; `pulsetime_sec < 2 * poll_interval_sec` (the server-side merge would otherwise fragment); duplicate `bundle_id` in `[[apps]]`; empty `apps` list. These checks encode the expectations in `config.toml.example` — don't silently relax them. Every failure raises `ValueError` and `cli.main` maps that to exit code `2`.
 
-`watcher.run()` returns `int`: `0` normal, `3` permission denied under `--once`. Daemon-mode bucket creation retries forever with exponential backoff capped at 60s; `--once` gives up after 3 attempts and lets the exception bubble so smoke tests fail fast.
+`watcher.run()` returns `int`: `0` normal, `3` permission denied under `--once`. Daemon-mode bucket creation retries forever with exponential backoff capped at 60s; `--once` gives up after 3 attempts and re-raises `RequestException`, which `cli.main` catches and maps to exit code `4` with a one-line error. Smoke tests still fail fast — they just get a clean exit code instead of a traceback.
 
 ### Two layered design rules
 
