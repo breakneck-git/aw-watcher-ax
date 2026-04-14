@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aw-watcher-ax"
-version = "0.2.0"
+version = "0.3.0"
 description = "ActivityWatch watcher that captures context (chat/conversation titles) from focused macOS apps via the Accessibility API"
 readme = "README.md"
 requires-python = ">=3.11"

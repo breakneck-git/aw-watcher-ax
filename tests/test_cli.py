@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from aw_watcher_ax import cli, watcher
+from aw_watcher_ax import __version__, cli, watcher
 from aw_watcher_ax.config import AppConfig, Config
 
 
@@ -65,7 +65,7 @@ def test_main_version_flag_prints_version(capsys: pytest.CaptureFixture[str]) ->
         cli.main(["--version"])
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "0.2.0" in (captured.out + captured.err)
+    assert __version__ in (captured.out + captured.err)
 
 
 def test_main_returns_0_on_keyboard_interrupt(
