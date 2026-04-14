@@ -205,3 +205,35 @@ def test_daemon_loop_swallows_exception_and_continues_polling(
         watcher.run(cfg, once=False)
 
     assert calls["n"] == 3
+
+
+def test_daemon_loop_blocks_when_permission_revoked_and_recovers(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config, requests_mock: MagicMock
+) -> None:
+    # Sequence of check_accessibility_permission() return values:
+    # 1. initial _wait_for_permission (prompt=True) → True
+    # 2. loop iter 1 pre-poll check (prompt=False) → False (revoked)
+    # 3. _wait_for_permission (prompt=True) → False (still revoked)
+    # 4. _wait_for_permission while (prompt=False) → False
+    # 5. _wait_for_permission while (prompt=False) → True (regranted)
+    # 6. loop iter 2 pre-poll check (prompt=False) → True
+    # then _poll_once raises KeyboardInterrupt to exit
+    perm_seq = iter([True, False, False, False, True, True])
+    monkeypatch.setattr(watcher, "check_accessibility_permission", lambda *, prompt: next(perm_seq))
+
+    poll_calls = {"n": 0}
+
+    def poll(*_args, **_kwargs):
+        poll_calls["n"] += 1
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(watcher, "_poll_once", poll)
+
+    fake_time = MagicMock()
+    fake_time.sleep = lambda _s: None
+    monkeypatch.setattr(watcher, "time", fake_time)
+
+    with pytest.raises(KeyboardInterrupt):
+        watcher.run(cfg, once=False)
+
+    assert poll_calls["n"] == 1

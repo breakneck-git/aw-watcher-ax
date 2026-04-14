@@ -108,6 +108,10 @@ def run(cfg: Config, *, once: bool = False) -> int:
     )
 
     while True:
+        if not check_accessibility_permission(prompt=False):
+            log.warning("Accessibility permission revoked; waiting for re-grant")
+            if not _wait_for_permission(once):
+                return 3
         try:
             _poll_once(cfg, bucket, apps_by_bundle)
         except Exception as e:
