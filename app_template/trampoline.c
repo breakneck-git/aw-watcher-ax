@@ -33,12 +33,23 @@
 #include <errno.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+// Forwarding target for SIGTERM/SIGINT. Set after fork() in the parent.
+// volatile sig_atomic_t is the only type a signal handler may touch portably.
+static volatile sig_atomic_t g_child = 0;
+
+static void forward_signal(int sig) {
+    if (g_child > 0) {
+        kill((pid_t)g_child, sig);
+    }
+}
 
 int main(int argc, char *argv[]) {
     char self_path[PATH_MAX];
@@ -85,6 +96,22 @@ int main(int argc, char *argv[]) {
         return 127;
     }
 
+    // Install SIGTERM/SIGINT handlers BEFORE fork so the parent forwards
+    // launchd's termination signal to the Python child. Without this,
+    // `launchctl unload` sends SIGTERM to us (the launchd-managed process),
+    // waitpid returns EINTR which we loop over, but the child Python never
+    // hears about it and keeps running until launchd's grace period expires
+    // and it's killed with SIGKILL — no chance for graceful shutdown. With
+    // SA_RESTART unset, waitpid returns EINTR so we can re-enter the wait
+    // after forwarding. execv() in the child resets user-installed handlers
+    // to the default, so Python starts with a clean slate.
+    struct sigaction sa;
+    sa.sa_handler = forward_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
     pid_t child = fork();
     if (child == -1) {
         perror("aw-watcher-ax: fork");
@@ -96,6 +123,7 @@ int main(int argc, char *argv[]) {
         perror("aw-watcher-ax: execv");
         _exit(127);
     }
+    g_child = (sig_atomic_t)child;
 
     int status;
     while (waitpid(child, &status, 0) == -1) {
