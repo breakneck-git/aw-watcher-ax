@@ -31,11 +31,23 @@ def check_accessibility_permission(*, prompt: bool) -> bool:
 
 
 def get_focused_app() -> tuple[int, str] | None:
-    """Return (pid, bundle_id) of the frontmost app, or None if unavailable."""
+    """Return (pid, bundle_id) of the frontmost app, or None if unavailable.
+
+    NSWorkspace maintains its `frontmostApplication` value by listening to
+    distributed notifications from the window server, and those notifications
+    are only delivered when the current thread's runloop runs. In a long-lived
+    daemon that never spins a runloop, the value latches to whatever was
+    frontmost at process start — every subsequent call returns the same
+    stale app regardless of actual focus changes. Pumping the runloop for a
+    handful of milliseconds before each query drains any pending notifications
+    so the query returns a fresh value.
+    """
     try:
         from AppKit import NSWorkspace  # type: ignore[import-not-found]
+        from Foundation import NSDate, NSRunLoop  # type: ignore[import-not-found]
     except ImportError as e:
         raise RuntimeError(_MACOS_ONLY) from e
+    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.02))
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     if app is None:
         return None

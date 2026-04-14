@@ -21,6 +21,7 @@ All notable changes to this project are documented here. Format follows
 ### Fixed
 - Regression from 0.2.0: removing the old `_extract_claude` left Claude Desktop with no working extractor, because Electron's AX tree is empty until `AXManualAccessibility` is set and the generic `heading`/`window_title` fallback returned nothing useful.
 - Launchd daemon Accessibility grant was silently ineffective because the bash launcher triggered the kernel's shebang chain (`/bin/bash` → `python3.11`), so TCC ended up tracking the Homebrew Python Mach-O's cdhash instead of the `.app` bundle's. The fork+wait C trampoline keeps our Mach-O alive as launchd's direct child, so python inherits TCC responsibility through the parent chain.
+- `get_focused_app()` returned a stale value in the long-running daemon: `NSWorkspace.frontmostApplication` is driven by window-server distributed notifications, which only get delivered when the current thread's runloop runs. Without a runloop the value latched to whatever was frontmost at daemon start and every subsequent poll returned the same app regardless of actual focus changes. Pumping the runloop for 20 ms before each query drains pending notifications so the result is fresh.
 
 ## [0.2.0] - 2026-04-13
 
