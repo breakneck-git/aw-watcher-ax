@@ -27,6 +27,17 @@ def _clean(value: Any, app_name: str) -> str | None:
     return s[:_MAX_LEN]
 
 
+def _node_text(el: Any, app_name: str) -> str | None:
+    """Return the first non-empty `_clean`-ed text on an element.
+
+    Checks AXTitle first (common for AXButton and similar) then AXValue
+    (common for AXStaticText). Both paths in `_extract_claude` use this so
+    the priority order is identical whether we're reading the sibling
+    itself or a descendant.
+    """
+    return _clean(ax_get(el, "AXTitle"), app_name) or _clean(ax_get(el, "AXValue"), app_name)
+
+
 def _extract_window_title(app_el: Any, app_name: str) -> str | None:
     win = ax_get(app_el, "AXFocusedWindow")
     if win is None:
@@ -47,26 +58,45 @@ def _extract_heading(app_el: Any, app_name: str) -> str | None:
 
 
 def _extract_claude(app_el: Any, app_name: str) -> str | None:
-    # Claude Desktop is an Electron app. Its chat-header toolbar contains an
-    # AXPopUpButton with description "Session options" sitting next to the
-    # chat title button. Walk the tree looking for any container whose direct
-    # children include that popup; the last AXButton with a non-empty title
-    # before it in the sibling order is the chat title.
-    for container in ax_walk(app_el, max_depth=25):
+    # Claude Desktop renders the chat header deep inside a Chromium/React tree.
+    # Two things the walk must handle:
+    #
+    # 1. Start from AXFocusedWindow, not app_el. Walking app_el.AXChildren
+    #    yields shallow window proxies that don't descend into the web content
+    #    — their subtree tops out around depth 6, while the real header sits
+    #    ~24 levels below the focused window.
+    # 2. The anchor is an AXPopUpButton whose AXDescription is "Session actions"
+    #    (Claude 1.2581+; previously "Session options"). It sits immediately
+    #    after the element that holds the chat title. That element is either
+    #    an AXButton with AXTitle (older layouts) or an AXGroup containing an
+    #    AXStaticText value (current layout, where a user-profile AXButton
+    #    sits earlier in the sibling list and would otherwise be mis-picked).
+    #    We find the anchor and read the *immediately preceding* sibling.
+    win = ax_get(app_el, "AXFocusedWindow")
+    if win is None:
+        return None
+    anchor_descs = ("Session actions", "Session options")
+    for container in ax_walk(win, max_depth=30):
         children = ax_get(container, "AXChildren") or []
-        last_title: str | None = None
-        found_anchor = False
-        for child in children:
-            role = ax_get(child, "AXRole")
-            if role == "AXButton":
-                title = _clean(ax_get(child, "AXTitle"), app_name)
-                if title:
-                    last_title = title
-            elif role == "AXPopUpButton" and ax_get(child, "AXDescription") == "Session options":
-                found_anchor = True
+        anchor_idx = -1
+        for i, child in enumerate(children):
+            if (
+                ax_get(child, "AXRole") == "AXPopUpButton"
+                and ax_get(child, "AXDescription") in anchor_descs
+            ):
+                anchor_idx = i
                 break
-        if found_anchor and last_title:
-            return last_title
+        if anchor_idx <= 0:
+            continue
+        prev = children[anchor_idx - 1]
+        # Try the sibling itself and up to 4 levels of descendants. In current
+        # Claude the title is an AXStaticText nested 1 AXGroup deep; the cap
+        # bounds accidental wandering into unrelated header content if Claude
+        # ships a future layout that nests deeper.
+        for el in ax_walk(prev, max_depth=4):
+            text = _node_text(el, app_name)
+            if text:
+                return text
     return None
 
 
