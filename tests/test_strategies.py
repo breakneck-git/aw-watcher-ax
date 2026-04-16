@@ -371,6 +371,70 @@ def test_claude_returns_none_when_title_is_deeper_than_max_depth() -> None:
     assert strategies.extract_context(cfg, pid=0) is None
 
 
+def test_claude_reads_title_via_more_options_anchor() -> None:
+    # Regular Chat / Cowork mode: the header popup anchor says
+    # "More options for <title>" instead of "Session actions".
+    spacer = FakeElement({"AXRole": "AXGroup"})
+    title_text = FakeElement(
+        {"AXRole": "AXStaticText", "AXValue": "Топ репозиториев для скиллов ИИ агентов"}
+    )
+    title_btn = FakeElement(
+        {"AXRole": "AXButton", "AXTitle": "Топ репозиториев для скиллов ИИ агентов"},
+        children=[FakeElement({"AXRole": "AXGroup"}, children=[title_text])],
+    )
+    more_popup = FakeElement(
+        {
+            "AXRole": "AXPopUpButton",
+            "AXDescription": "More options for Топ репозиториев для скиллов ИИ агентов",
+        }
+    )
+    header = FakeElement({"AXRole": "AXGroup"}, children=[spacer, title_btn, more_popup])
+    win = FakeElement({}, children=[header])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
+    )
+    assert (
+        strategies.extract_context(cfg, pid=0)
+        == "Топ репозиториев для скиллов ИИ агентов"
+    )
+
+
+def test_claude_sidebar_popups_skipped_by_anchor_idx_guard() -> None:
+    # Sidebar entries wrap the AXPopUpButton inside a nested AXGroup, so it
+    # appears at anchor_idx 0 inside its immediate parent — the <= 0 guard
+    # skips it. Only the header popup (a direct sibling of the title) matches.
+    sidebar_btn = FakeElement({"AXRole": "AXButton", "AXTitle": "Other chat"})
+    sidebar_popup = FakeElement(
+        {"AXRole": "AXPopUpButton", "AXDescription": "More options for Other chat"}
+    )
+    sidebar_popup_wrap = FakeElement({"AXRole": "AXGroup"}, children=[sidebar_popup])
+    sidebar_entry = FakeElement({"AXRole": "AXGroup"}, children=[sidebar_btn, sidebar_popup_wrap])
+
+    spacer = FakeElement({"AXRole": "AXGroup"})
+    title_btn = FakeElement({"AXRole": "AXButton", "AXTitle": "Active chat"})
+    header_popup = FakeElement(
+        {"AXRole": "AXPopUpButton", "AXDescription": "More options for Active chat"}
+    )
+    header = FakeElement({"AXRole": "AXGroup"}, children=[spacer, title_btn, header_popup])
+
+    content = FakeElement({"AXRole": "AXGroup"}, children=[sidebar_entry, header])
+    win = FakeElement({}, children=[content])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
+    )
+    assert strategies.extract_context(cfg, pid=0) == "Active chat"
+
+
 def test_claude_returns_none_when_all_descendants_equal_app_name() -> None:
     # Descendants exist and have text, but every text value is the app name —
     # `_clean` strips them all, so the descent loop runs but yields nothing.

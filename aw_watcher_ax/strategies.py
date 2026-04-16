@@ -16,6 +16,8 @@ from .ax_utils import ax_get, ax_set, ax_walk, create_app_element
 from .config import AppConfig
 
 _MAX_LEN = 200
+_SESSION_DESCS = ("Session actions", "Session options")  # Claude Code sessions
+_MORE_PREFIX = "More options for "  # regular Chat / Cowork header popup
 
 
 def _clean(value: Any, app_name: str) -> str | None:
@@ -57,42 +59,37 @@ def _extract_heading(app_el: Any, app_name: str) -> str | None:
     return None
 
 
+def _is_anchor(el: Any) -> bool:
+    """True if `el` is the AXPopUpButton that sits right after the chat title."""
+    if ax_get(el, "AXRole") != "AXPopUpButton":
+        return False
+    desc = ax_get(el, "AXDescription") or ""
+    return desc in _SESSION_DESCS or desc.startswith(_MORE_PREFIX)
+
+
+def _find_title_sibling(container: Any) -> Any | None:
+    """Return the element immediately before the anchor popup, or None.
+
+    Sidebar entries nest the popup inside an extra AXGroup, so the popup
+    appears at index 0 in its immediate parent and is skipped.
+    """
+    children = ax_get(container, "AXChildren") or []
+    for i, child in enumerate(children):
+        if _is_anchor(child) and i > 0:
+            return children[i - 1]
+    return None
+
+
 def _extract_claude(app_el: Any, app_name: str) -> str | None:
-    # Claude Desktop renders the chat header deep inside a Chromium/React tree.
-    # Two things the walk must handle:
-    #
-    # 1. Start from AXFocusedWindow, not app_el. Walking app_el.AXChildren
-    #    yields shallow window proxies that don't descend into the web content
-    #    — their subtree tops out around depth 6, while the real header sits
-    #    ~24 levels below the focused window.
-    # 2. The anchor is an AXPopUpButton whose AXDescription is "Session actions"
-    #    (Claude 1.2581+; previously "Session options"). It sits immediately
-    #    after the element that holds the chat title. That element is either
-    #    an AXButton with AXTitle (older layouts) or an AXGroup containing an
-    #    AXStaticText value (current layout, where a user-profile AXButton
-    #    sits earlier in the sibling list and would otherwise be mis-picked).
-    #    We find the anchor and read the *immediately preceding* sibling.
+    # Start from AXFocusedWindow, not app_el — app_el.AXChildren yields
+    # shallow window proxies that don't descend into the web content.
     win = ax_get(app_el, "AXFocusedWindow")
     if win is None:
         return None
-    anchor_descs = ("Session actions", "Session options")
     for container in ax_walk(win, max_depth=30):
-        children = ax_get(container, "AXChildren") or []
-        anchor_idx = -1
-        for i, child in enumerate(children):
-            if (
-                ax_get(child, "AXRole") == "AXPopUpButton"
-                and ax_get(child, "AXDescription") in anchor_descs
-            ):
-                anchor_idx = i
-                break
-        if anchor_idx <= 0:
+        prev = _find_title_sibling(container)
+        if prev is None:
             continue
-        prev = children[anchor_idx - 1]
-        # Try the sibling itself and up to 4 levels of descendants. In current
-        # Claude the title is an AXStaticText nested 1 AXGroup deep; the cap
-        # bounds accidental wandering into unrelated header content if Claude
-        # ships a future layout that nests deeper.
         for el in ax_walk(prev, max_depth=4):
             text = _node_text(el, app_name)
             if text:
