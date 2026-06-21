@@ -86,11 +86,21 @@ codesign --force --deep --sign - "$APP_DIR"
 
 echo "Installing launchd service..."
 mkdir -p "$LOG_DIR"
-sed -e "s|BIN_PATH|$APP_BIN|g" \
-    -e "s|LOG_DIR|$LOG_DIR|g" \
+# Escape sed replacement metacharacters (& \ and the | delimiter) in case $HOME
+# contains them, so the paths land verbatim in the generated plist.
+esc_sed() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+sed -e "s|BIN_PATH|$(esc_sed "$APP_BIN")|g" \
+    -e "s|LOG_DIR|$(esc_sed "$LOG_DIR")|g" \
     "$PLIST_SRC" > "$PLIST_DST"
 
-launchctl load "$PLIST_DST"
+# Under `set -e`, an unguarded `launchctl load` returning nonzero (e.g. the
+# service is already bootstrapped) would abort the script at this final step
+# after everything is already in place. Surface a clear hint instead.
+if ! launchctl load "$PLIST_DST"; then
+    echo "Warning: 'launchctl load' returned an error — the service may already be loaded." >&2
+    echo "  If the watcher isn't running, reload it with:" >&2
+    echo "    launchctl unload \"$PLIST_DST\" && launchctl load \"$PLIST_DST\"" >&2
+fi
 
 echo "✓ aw-watcher-ax installed. Polling every 60s."
 echo "  App bundle:     $APP_DIR"

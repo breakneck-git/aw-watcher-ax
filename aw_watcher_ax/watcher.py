@@ -4,7 +4,7 @@ import time
 from datetime import UTC, datetime
 
 import requests
-from requests import RequestException
+from requests import HTTPError, RequestException
 
 from .ax_utils import check_accessibility_permission, get_focused_app
 from .config import Config
@@ -15,10 +15,11 @@ log = logging.getLogger(__name__)
 _BUCKET_PREFIX = "aw-watcher-ax"
 _BUCKET_TYPE = "currentwindow"
 _PERMISSION_RETRY_SEC = 30
+_HOSTNAME = socket.gethostname()  # constant for the process; the bucket id derives from it
 
 
 def _bucket_id() -> str:
-    return f"{_BUCKET_PREFIX}_{socket.gethostname()}"
+    return f"{_BUCKET_PREFIX}_{_HOSTNAME}"
 
 
 def _ensure_bucket(base_url: str, bucket_id: str) -> None:
@@ -26,7 +27,7 @@ def _ensure_bucket(base_url: str, bucket_id: str) -> None:
     payload = {
         "client": "aw-watcher-ax",
         "type": _BUCKET_TYPE,
-        "hostname": socket.gethostname(),
+        "hostname": _HOSTNAME,
     }
     resp = requests.post(url, json=payload, timeout=10)
     # 200/201 = created, 304 = already exists (AW returns this for idempotency)
@@ -139,10 +140,18 @@ def _poll_once(cfg: Config, bucket: str, apps_by_bundle: dict) -> None:
     if not ctx:
         log.debug("%s: no context extracted", app_cfg.name)
         return
-    _heartbeat(
-        cfg.aw_base_url,
-        bucket,
-        {"app": app_cfg.name, "context": ctx},
-        pulsetime=cfg.pulsetime_sec,
-    )
+    data = {"app": app_cfg.name, "context": ctx}
+    try:
+        _heartbeat(cfg.aw_base_url, bucket, data, pulsetime=cfg.pulsetime_sec)
+    except HTTPError as e:
+        # A 404 means the bucket vanished (AW datastore reset/migration, or it
+        # was deleted). It was created only once at startup, so without this a
+        # long-lived daemon would 404 every heartbeat forever and silently
+        # record nothing. Recreate it and retry the heartbeat once. Other HTTP
+        # errors propagate unchanged.
+        if e.response is None or e.response.status_code != 404:
+            raise
+        log.warning("bucket %s missing (404); recreating", bucket)
+        _ensure_bucket(cfg.aw_base_url, bucket)
+        _heartbeat(cfg.aw_base_url, bucket, data, pulsetime=cfg.pulsetime_sec)
     log.info("%s: %s", app_cfg.name, ctx)

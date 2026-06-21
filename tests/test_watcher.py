@@ -144,6 +144,130 @@ def test_once_mode_reraises_request_exception_from_heartbeat(
         watcher.run(cfg, once=True)
 
 
+def test_poll_once_recreates_bucket_and_retries_on_heartbeat_404(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config
+) -> None:
+    # If the AW bucket disappears (datastore reset/migration), the first
+    # heartbeat 404s. The watcher must recreate the bucket and retry once,
+    # rather than 404ing silently forever.
+    import requests as real_requests
+
+    urls: list[str] = []
+
+    def post(url: str, **_kwargs):
+        urls.append(url)
+        if "/heartbeat" in url:
+            resp = MagicMock()
+            if sum(1 for u in urls if "/heartbeat" in u) == 1:
+                err = real_requests.HTTPError("404 Not Found")
+                err.response = MagicMock(status_code=404)
+                resp.raise_for_status.side_effect = err
+            else:
+                resp.raise_for_status = MagicMock()
+            return resp
+        return MagicMock(status_code=200, raise_for_status=MagicMock())
+
+    mock = MagicMock()
+    mock.post.side_effect = post
+    monkeypatch.setattr(watcher, "requests", mock)
+    monkeypatch.setattr(
+        watcher, "get_focused_app", lambda: (1234, "com.anthropic.claudefordesktop")
+    )
+    monkeypatch.setattr(watcher, "extract_context", lambda *_a, **_k: "chat title")
+
+    assert watcher.run(cfg, once=True) == 0
+
+    heartbeats = [u for u in urls if "/heartbeat" in u]
+    bucket_creates = [u for u in urls if u.endswith("/buckets/" + watcher._bucket_id())]
+    assert len(heartbeats) == 2  # initial 404 + retry after recreation
+    assert len(bucket_creates) == 2  # startup + recovery
+
+
+def test_poll_once_does_not_retry_non_404_heartbeat_error(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config
+) -> None:
+    # A 500 (or any non-404) must NOT trigger bucket recreation; it propagates
+    # like any other heartbeat failure (re-raised in --once mode).
+    import requests as real_requests
+
+    urls: list[str] = []
+
+    def post(url: str, **_kwargs):
+        urls.append(url)
+        if "/heartbeat" in url:
+            resp = MagicMock()
+            err = real_requests.HTTPError("500 Server Error")
+            err.response = MagicMock(status_code=500)
+            resp.raise_for_status.side_effect = err
+            return resp
+        return MagicMock(status_code=200, raise_for_status=MagicMock())
+
+    mock = MagicMock()
+    mock.post.side_effect = post
+    monkeypatch.setattr(watcher, "requests", mock)
+    monkeypatch.setattr(
+        watcher, "get_focused_app", lambda: (1234, "com.anthropic.claudefordesktop")
+    )
+    monkeypatch.setattr(watcher, "extract_context", lambda *_a, **_k: "chat title")
+
+    with pytest.raises(real_requests.HTTPError):
+        watcher.run(cfg, once=True)
+
+    bucket_creates = [u for u in urls if u.endswith("/buckets/" + watcher._bucket_id())]
+    assert len(bucket_creates) == 1  # startup only, no recovery attempt
+
+
+def test_ensure_bucket_treats_304_as_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 304 = bucket already exists (AW idempotency). Must return without raising.
+    mock = MagicMock()
+    resp = MagicMock(status_code=304)
+    resp.raise_for_status.side_effect = AssertionError("raise_for_status must not be called on 304")
+    mock.post.return_value = resp
+    monkeypatch.setattr(watcher, "requests", mock)
+
+    watcher._ensure_bucket("http://x", "bucket")  # must not raise
+
+
+def test_ensure_bucket_raises_on_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests as real_requests
+
+    mock = MagicMock()
+    resp = MagicMock(status_code=500)
+    resp.raise_for_status.side_effect = real_requests.HTTPError("500 Server Error")
+    mock.post.return_value = resp
+    monkeypatch.setattr(watcher, "requests", mock)
+
+    with pytest.raises(real_requests.HTTPError):
+        watcher._ensure_bucket("http://x", "bucket")
+
+
+def test_ensure_bucket_with_retry_caps_backoff_at_60(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pins both the forever-retry loop (max_attempts=None) and the 60s cap:
+    # backoff doubles 1,2,4,...,32 then clamps at 60.
+    import requests as real_requests
+
+    calls = {"n": 0}
+
+    def post(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 8:
+            raise real_requests.ConnectionError("AW not up yet")
+        return MagicMock(status_code=200, raise_for_status=MagicMock())
+
+    mock = MagicMock()
+    mock.post.side_effect = post
+    monkeypatch.setattr(watcher, "requests", mock)
+
+    sleeps: list[float] = []
+    fake_time = MagicMock()
+    fake_time.sleep = lambda s: sleeps.append(s)
+    monkeypatch.setattr(watcher, "time", fake_time)
+
+    watcher._ensure_bucket_with_retry("http://x", "bucket", max_attempts=None)
+
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+
+
 def test_ensure_bucket_with_retry_succeeds_after_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

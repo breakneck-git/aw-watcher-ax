@@ -317,3 +317,113 @@ def test_accepts_https_aw_base_url(tmp_path: Path) -> None:
         )
     )
     assert cfg.aw_base_url == "https://example.com:5600"
+
+
+def test_aw_base_url_trailing_slash_normalized(tmp_path: Path) -> None:
+    # A trailing slash would otherwise yield "http://host:5600//api/0/..." when
+    # URLs are built by concatenation in watcher.py.
+    cfg = load_config(
+        _write(
+            tmp_path,
+            """
+        aw_base_url = "http://localhost:5600/"
+
+        [[apps]]
+        bundle_id = "dev.zed.Zed"
+        name = "Zed"
+    """,
+        )
+    )
+    assert cfg.aw_base_url == "http://localhost:5600"
+
+
+def test_rejects_aw_base_url_without_host(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="aw_base_url"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            aw_base_url = "http://"
+
+            [[apps]]
+            bundle_id = "dev.zed.Zed"
+            name = "Zed"
+        """,
+            )
+        )
+
+
+def test_rejects_list_poll_interval(tmp_path: Path) -> None:
+    # A non-int TOML value must raise ValueError (mapped to exit 2), not an
+    # uncaught TypeError from int([...]) that would crash with exit 1.
+    with pytest.raises(ValueError, match="poll_interval_sec"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            poll_interval_sec = [60]
+
+            [[apps]]
+            bundle_id = "dev.zed.Zed"
+            name = "Zed"
+        """,
+            )
+        )
+
+
+def test_rejects_float_pulsetime(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="pulsetime_sec"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            pulsetime_sec = 180.5
+
+            [[apps]]
+            bundle_id = "dev.zed.Zed"
+            name = "Zed"
+        """,
+            )
+        )
+
+
+def test_rejects_boolean_poll_interval(tmp_path: Path) -> None:
+    # bool is an int subclass; `true` must not silently become 1.
+    with pytest.raises(ValueError, match="poll_interval_sec"):
+        load_config(
+            _write(
+                tmp_path,
+                """
+            poll_interval_sec = true
+
+            [[apps]]
+            bundle_id = "dev.zed.Zed"
+            name = "Zed"
+        """,
+            )
+        )
+
+
+def test_warns_on_duplicate_app_name(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # Two distinct bundle_ids sharing a name is allowed (e.g. mapping app
+    # variants to one logical name) but emits a warning since AW keys events on
+    # the name.
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        cfg = load_config(
+            _write(
+                tmp_path,
+                """
+            [[apps]]
+            bundle_id = "dev.zed.Zed"
+            name = "Editor"
+
+            [[apps]]
+            bundle_id = "dev.zed.Zed.Preview"
+            name = "Editor"
+        """,
+            )
+        )
+    assert len(cfg.apps) == 2
+    assert any("duplicate app name" in r.message.lower() for r in caplog.records)

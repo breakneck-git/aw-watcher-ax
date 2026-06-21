@@ -1,10 +1,28 @@
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
+
+log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path.home() / ".config" / "aw-watcher-ax" / "config.toml"
 
 VALID_STRATEGIES = ("auto", "window_title", "heading")
+
+
+def _require_int_seconds(data: dict, key: str, default: int) -> int:
+    """Read an integer-seconds field, rejecting non-int types.
+
+    bool is an int subclass and TOML floats/strings/arrays are distinct types;
+    int() would silently truncate a float or raise an uncaught TypeError on a
+    list. Reject anything that isn't a plain int so the failure is a clean
+    ValueError (exit code 2) naming the field, not a stdlib traceback.
+    """
+    raw = data.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"{key} must be an integer number of seconds, got {raw!r}")
+    return raw
 
 
 @dataclass
@@ -36,6 +54,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
 
     apps: list[AppConfig] = []
     seen: set[str] = set()
+    seen_names: set[str] = set()
     for entry in data.get("apps", []):
         if "bundle_id" not in entry or "name" not in entry:
             raise ValueError(f"[[apps]] entry missing bundle_id or name: {entry}")
@@ -48,6 +67,16 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         if bundle_id in seen:
             raise ValueError(f"duplicate bundle_id in [[apps]]: {bundle_id!r}")
         seen.add(bundle_id)
+        # Distinct bundle_ids sharing a name is allowed (mapping app variants to
+        # one logical name), but AW keys events on the name, so warn — it is
+        # usually an accident that makes per-app data ambiguous.
+        if name in seen_names:
+            log.warning(
+                "duplicate app name %r across multiple bundle_ids; "
+                "their ActivityWatch events will be indistinguishable",
+                name,
+            )
+        seen_names.add(name)
         strategy = entry.get("strategy", "auto")
         if strategy not in VALID_STRATEGIES:
             raise ValueError(
@@ -65,8 +94,8 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     if not apps:
         raise ValueError("config must declare at least one [[apps]] entry")
 
-    poll_interval_sec = int(data.get("poll_interval_sec", 60))
-    pulsetime_sec = int(data.get("pulsetime_sec", 180))
+    poll_interval_sec = _require_int_seconds(data, "poll_interval_sec", 60)
+    pulsetime_sec = _require_int_seconds(data, "pulsetime_sec", 180)
     if poll_interval_sec <= 0:
         raise ValueError(f"poll_interval_sec must be positive, got {poll_interval_sec}")
     if pulsetime_sec <= 0:
@@ -79,10 +108,16 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         )
 
     aw_base_url = data.get("aw_base_url", "http://localhost:5600")
-    if not isinstance(aw_base_url, str) or not (
-        aw_base_url.startswith("http://") or aw_base_url.startswith("https://")
-    ):
-        raise ValueError(f"aw_base_url must start with http:// or https://, got {aw_base_url!r}")
+    if not isinstance(aw_base_url, str):
+        raise ValueError(f"aw_base_url must be a string, got {aw_base_url!r}")
+    parsed = urlparse(aw_base_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"aw_base_url must be an http:// or https:// URL with a host, got {aw_base_url!r}"
+        )
+    # Strip any trailing slash so URL building (f"{base}/api/0/...") never emits
+    # a double slash, which some servers route differently or 404.
+    aw_base_url = aw_base_url.rstrip("/")
 
     return Config(
         poll_interval_sec=poll_interval_sec,
