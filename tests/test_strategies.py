@@ -14,6 +14,9 @@ class FakeElement:
     ) -> None:
         self.attrs = attrs or {}
         self.children = children or []
+        self.parent: FakeElement | None = None
+        for child in self.children:
+            child.parent = self
 
 
 def _fake_ax_get(elem: Any, attr: str) -> Any:
@@ -21,6 +24,8 @@ def _fake_ax_get(elem: Any, attr: str) -> Any:
         return None
     if attr == "AXChildren":
         return list(elem.children)
+    if attr == "AXParent":
+        return elem.parent
     return elem.attrs.get(attr)
 
 
@@ -126,6 +131,18 @@ def test_heading_reads_value_when_title_missing() -> None:
     assert strategies.extract_context(cfg, pid=0) == "Dinner plans"
 
 
+def test_heading_whitespace_title_falls_through_to_value() -> None:
+    # A whitespace-only AXTitle is truthy as a raw string but empty after
+    # cleaning; the AXValue should still be used (matches _node_text semantics).
+    heading = FakeElement({"AXRole": "AXHeading", "AXTitle": "   ", "AXValue": "Real heading"})
+    win = FakeElement({}, children=[heading])
+    app = FakeElement({"AXFocusedWindow": win})
+    _set_app(app)
+
+    cfg = AppConfig(bundle_id="x", name="App", strategy="heading")
+    assert strategies.extract_context(cfg, pid=0) == "Real heading"
+
+
 def test_heading_none_when_no_heading() -> None:
     win = FakeElement(
         {},
@@ -175,6 +192,22 @@ def test_auto_falls_through_heading_then_window_title() -> None:
 
     cfg = AppConfig(bundle_id="unknown.app", name="Unknown", strategy="auto")
     assert strategies.extract_context(cfg, pid=0) == "Important doc"
+
+
+def test_node_text_prefers_axtitle_over_axvalue() -> None:
+    el = FakeElement({"AXTitle": "from-title", "AXValue": "from-value"})
+    assert strategies._node_text(el, "App") == "from-title"
+
+
+def test_extract_context_returns_none_for_unknown_strategy() -> None:
+    # Defensive fallthrough: load_config rejects unknown strategies, but
+    # extract_context is also called with hand-built AppConfigs that bypass it.
+    win = FakeElement({"AXTitle": "doc"})
+    app = FakeElement({"AXFocusedWindow": win})
+    _set_app(app)
+
+    cfg = AppConfig(bundle_id="x", name="App", strategy="bogus")
+    assert strategies.extract_context(cfg, pid=0) is None
 
 
 def test_auto_returns_none_when_nothing_useful() -> None:
@@ -251,10 +284,7 @@ def test_claude_reads_title_from_group_sibling_new_structure() -> None:
         name="Claude",
         strategy="auto",
     )
-    assert (
-        strategies.extract_context(cfg, pid=0)
-        == "Add pagination support for Notion API queries"
-    )
+    assert strategies.extract_context(cfg, pid=0) == "Add pagination support for Notion API queries"
 
 
 def test_claude_returns_none_when_prev_sibling_has_no_text() -> None:
@@ -398,10 +428,7 @@ def test_claude_reads_title_via_more_options_anchor() -> None:
         name="Claude",
         strategy="auto",
     )
-    assert (
-        strategies.extract_context(cfg, pid=0)
-        == "Топ репозиториев для скиллов ИИ агентов"
-    )
+    assert strategies.extract_context(cfg, pid=0) == "Топ репозиториев для скиллов ИИ агентов"
 
 
 def test_claude_sidebar_popups_skipped_by_anchor_idx_guard() -> None:
@@ -433,6 +460,92 @@ def test_claude_sidebar_popups_skipped_by_anchor_idx_guard() -> None:
         strategy="auto",
     )
     assert strategies.extract_context(cfg, pid=0) == "Active chat"
+
+
+def test_claude_reads_title_from_separate_group_with_view_toggle_checkboxes() -> None:
+    # Claude Desktop (2026-06+) Claude Code session header: the title button and
+    # the "Session actions" anchor live in SEPARATE sibling groups, with a row of
+    # view-toggle AXCheckBoxes (Terminal/Diff/Preview, integer AXValue 0) sitting
+    # between them. Regression pin for "every Claude heartbeat logs 0": the
+    # checkbox's integer 0 must never leak out as the context, and the title in
+    # the neighbouring group must be found.
+    title_btn = FakeElement({"AXRole": "AXButton", "AXTitle": "dashboard"})
+    profile = FakeElement({"AXRole": "AXPopUpButton", "AXTitle": "breakneck"})
+    group_a = FakeElement({"AXRole": "AXGroup"}, children=[title_btn, profile])
+    checkboxes = [
+        FakeElement({"AXRole": "AXCheckBox", "AXValue": 0, "AXDescription": d})
+        for d in ("Terminal", "Diff", "Preview")
+    ]
+    anchor = FakeElement({"AXRole": "AXPopUpButton", "AXDescription": "Session actions"})
+    group_b = FakeElement({"AXRole": "AXGroup"}, children=[*checkboxes, anchor])
+    row = FakeElement({"AXRole": "AXGroup"}, children=[group_a, group_b])
+    win = FakeElement({}, children=[row])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
+    )
+    assert strategies.extract_context(cfg, pid=0) == "dashboard"
+
+
+def test_claude_session_anchor_as_first_child_still_finds_title() -> None:
+    # A Claude Code session with no Terminal/Diff/Preview pane open has no
+    # view-toggle checkboxes, so the "Session actions" popup can be the first
+    # (only) child of its actions group. The index-0 skip (which exists only to
+    # drop sidebar "More options" popups) must not suppress this header anchor.
+    title_btn = FakeElement({"AXRole": "AXButton", "AXTitle": "dashboard"})
+    profile = FakeElement({"AXRole": "AXPopUpButton", "AXTitle": "breakneck"})
+    group_a = FakeElement({"AXRole": "AXGroup"}, children=[title_btn, profile])
+    anchor = FakeElement({"AXRole": "AXPopUpButton", "AXDescription": "Session actions"})
+    group_b = FakeElement({"AXRole": "AXGroup"}, children=[anchor])  # anchor at index 0
+    row = FakeElement({"AXRole": "AXGroup"}, children=[group_a, group_b])
+    win = FakeElement({}, children=[row])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
+    )
+    assert strategies.extract_context(cfg, pid=0) == "dashboard"
+
+
+def test_claude_skips_string_labelled_view_toggle_between_title_and_anchor() -> None:
+    # Defends against a layout variant where a view-toggle exposes its label as
+    # a string (AXTitle "Preview") rather than the integer-0 AXValue seen today.
+    # Such a toggle sits between the title group and the anchor; it must not be
+    # emitted as the conversation context.
+    title_btn = FakeElement({"AXRole": "AXButton", "AXTitle": "real dashboard"})
+    group_a = FakeElement({"AXRole": "AXGroup"}, children=[title_btn])
+    toggle = FakeElement({"AXRole": "AXCheckBox", "AXTitle": "Preview"})
+    anchor = FakeElement({"AXRole": "AXPopUpButton", "AXDescription": "Session actions"})
+    group_b = FakeElement({"AXRole": "AXGroup"}, children=[toggle, anchor])
+    row = FakeElement({"AXRole": "AXGroup"}, children=[group_a, group_b])
+    win = FakeElement({}, children=[row])
+    app = FakeElement({"AXFocusedWindow": win}, children=[win])
+    _set_app(app)
+
+    cfg = AppConfig(
+        bundle_id="com.anthropic.claudefordesktop",
+        name="Claude",
+        strategy="auto",
+    )
+    assert strategies.extract_context(cfg, pid=0) == "real dashboard"
+
+
+def test_clean_rejects_non_string_values() -> None:
+    # A context title is always text. Non-string AX values — most importantly an
+    # AXCheckBox's integer AXValue of 0 — must be dropped, not stringified to "0".
+    assert strategies._clean(0, "Claude") is None
+    assert strategies._clean(0.0, "Claude") is None
+    assert strategies._clean(False, "Claude") is None
+    # A genuine string that happens to be "0" is a valid (if odd) title.
+    assert strategies._clean("0", "Claude") == "0"
+    assert strategies._clean("real chat", "Claude") == "real chat"
 
 
 def test_claude_returns_none_when_all_descendants_equal_app_name() -> None:

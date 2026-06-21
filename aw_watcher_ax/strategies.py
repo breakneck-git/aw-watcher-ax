@@ -18,12 +18,18 @@ from .config import AppConfig
 _MAX_LEN = 200
 _SESSION_DESCS = ("Session actions", "Session options")  # Claude Code sessions
 _MORE_PREFIX = "More options for "  # regular Chat / Cowork header popup
+_TITLE_UP_LEVELS = 4  # how far up from the anchor to look for the title's row
+_TITLE_DEPTH = 5  # how deep within a row to search for the title text
 
 
 def _clean(value: Any, app_name: str) -> str | None:
-    if value is None:
+    # AX text attributes (window titles, chat names) arrive as pyobjc str
+    # subclasses. A non-string value is never a context title — most notably an
+    # AXCheckBox's integer AXValue of 0, which str() would turn into the literal
+    # "0" that leaked into every Claude heartbeat. Reject anything non-string.
+    if not isinstance(value, str):
         return None
-    s = str(value).strip()
+    s = value.strip()
     if not s or s == app_name:
         return None
     return s[:_MAX_LEN]
@@ -52,8 +58,7 @@ def _extract_heading(app_el: Any, app_name: str) -> str | None:
     if win is None:
         return None
     for el in ax_walk(win, role="AXHeading", max_depth=15):
-        text = ax_get(el, "AXTitle") or ax_get(el, "AXValue")
-        cleaned = _clean(text, app_name)
+        cleaned = _node_text(el, app_name)
         if cleaned:
             return cleaned
     return None
@@ -67,17 +72,30 @@ def _is_anchor(el: Any) -> bool:
     return desc in _SESSION_DESCS or desc.startswith(_MORE_PREFIX)
 
 
-def _find_title_sibling(container: Any) -> Any | None:
-    """Return the element immediately before the anchor popup, or None.
+_SKIP_ROLES = ("AXPopUpButton", "AXCheckBox")  # menus and view-toggles, never the title
 
-    Sidebar entries nest the popup inside an extra AXGroup, so the popup
-    appears at index 0 in its immediate parent and is skipped.
+
+def _title_before_anchor(row: Any, anchor_desc: str, app_name: str) -> str | None:
+    """Return the last title-bearing text in `row` that precedes the anchor.
+
+    The conversation title sits just before the anchor in the header row, but
+    so do controls that are never the title: the user-profile menu and model
+    picker (AXPopUpButton) and the Terminal/Diff/Preview view-toggles
+    (AXCheckBox). Skip those by role and stop at the anchor, matched by its
+    AXDescription. "Last before the anchor" beats "first in the row" because
+    earlier elements include the profile button.
     """
-    children = ax_get(container, "AXChildren") or []
-    for i, child in enumerate(children):
-        if _is_anchor(child) and i > 0:
-            return children[i - 1]
-    return None
+    last: str | None = None
+    for el in ax_walk(row, max_depth=_TITLE_DEPTH):
+        if ax_get(el, "AXRole") in _SKIP_ROLES:
+            # The anchor is an AXPopUpButton; stop the scan when we reach it.
+            if (ax_get(el, "AXDescription") or "") == anchor_desc:
+                return last
+            continue
+        text = _node_text(el, app_name)
+        if text:
+            last = text
+    return last
 
 
 def _extract_claude(app_el: Any, app_name: str) -> str | None:
@@ -87,13 +105,38 @@ def _extract_claude(app_el: Any, app_name: str) -> str | None:
     if win is None:
         return None
     for container in ax_walk(win, max_depth=30):
-        prev = _find_title_sibling(container)
-        if prev is None:
-            continue
-        for el in ax_walk(prev, max_depth=4):
-            text = _node_text(el, app_name)
-            if text:
-                return text
+        children = ax_get(container, "AXChildren") or []
+        for i, child in enumerate(children):
+            if not _is_anchor(child):
+                continue
+            desc = ax_get(child, "AXDescription") or ""
+            # Chat / Cowork: the title is embedded in "More options for <title>".
+            if desc.startswith(_MORE_PREFIX):
+                # Sidebar rows wrap this popup in an extra AXGroup so it lands at
+                # index 0; the active header's popup is a later sibling. The same
+                # "More options for X" text appears on both, so only index > 0
+                # distinguishes the active conversation from a sidebar entry.
+                if i == 0:
+                    continue
+                title = _clean(desc[len(_MORE_PREFIX) :], app_name)
+                if title:
+                    return title
+                continue
+            # Claude Code sessions ("Session actions"/"Session options"): this
+            # anchor only ever appears in the active header (sidebar sessions use
+            # "More options for X"), so there is no sidebar collision and it is
+            # matched at any index. The title is a text element in the header row
+            # holding the anchor — newer layouts put it in a sibling group rather
+            # than directly before the anchor, so walk up until a row yields one.
+            node = child
+            for _ in range(_TITLE_UP_LEVELS):
+                parent = ax_get(node, "AXParent")
+                if parent is None:
+                    break
+                title = _title_before_anchor(parent, desc, app_name)
+                if title:
+                    return title
+                node = parent
     return None
 
 
