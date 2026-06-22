@@ -1,5 +1,7 @@
 import fcntl
 import logging
+import os
+import signal
 import socket
 import time
 from datetime import UTC, datetime
@@ -20,30 +22,82 @@ _BUCKET_TYPE = "currentwindow"
 _PERMISSION_RETRY_SEC = 30
 _HOSTNAME = socket.gethostname()  # constant for the process; the bucket id derives from it
 _LOCK_PATH = Path.home() / "Library" / "Caches" / "aw-watcher-ax" / "watcher.lock"
+_TAKEOVER_TICK_SEC = 0.1
+_TAKEOVER_TICKS = 30  # ~3s for a terminated holder to exit and release the lock
+
+
+def _read_lock_pid(lock_path: Path) -> int | None:
+    try:
+        text = lock_path.read_text().strip()
+    except OSError:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _terminate(pid: int) -> None:
+    """Stop a stale lock holder: SIGTERM, then SIGKILL if it lingers."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    for _ in range(_TAKEOVER_TICKS):
+        time.sleep(_TAKEOVER_TICK_SEC)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return  # gone
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _acquire_single_instance_lock(lock_path: Path | None = None) -> IO[str] | None:
-    """Take an exclusive flock so only one daemon writes to the bucket.
+    """Take the single-daemon flock — newest instance wins.
 
-    A duplicate instance (e.g. the .app double-launched alongside the launchd
-    agent) would post a second, independent heartbeat series to the same
-    bucket — and a long-lived copy keeps running stale in-memory code after the
-    venv is updated, silently corrupting the data. flock is released by the
-    kernel when the holder dies (even on SIGKILL), so a crashed daemon never
-    leaves a stale lock. Returns the open handle (keep it alive for the process
-    lifetime) on success, or None if another instance already holds the lock.
+    Only one watcher may write to the bucket; two would post competing,
+    independent heartbeat series. But bowing out to an existing holder is the
+    wrong default: a stale or hung daemon (one left running with pre-update
+    code) would then keep a freshly launched, current-code daemon from starting,
+    and the old process would go on emitting garbage while merely "running". So
+    if the lock is held, terminate the recorded holder and take over. The holder
+    writes its PID into the lock file; we read it, signal it, and acquire once
+    the kernel releases the lock on its death (flock is released even on
+    SIGKILL, so a crash never leaves a stale lock). Returns the open handle
+    (keep it alive for the process lifetime), or None if the lock still can't be
+    taken — e.g. the holder is this same process (never self-terminate) or it
+    refuses to die.
     """
     # Resolve _LOCK_PATH at call time (not as a default arg) so tests can
     # redirect it and the daemon picks up the module-level value.
     if lock_path is None:
         lock_path = _LOCK_PATH
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path, "w")
+    lock_path.touch(exist_ok=True)
+    handle = open(lock_path, "r+")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        handle.close()
-        return None
+        # Held by another instance — newest wins: terminate it and take over,
+        # unless the holder is our own process (don't kill the runner).
+        pid = _read_lock_pid(lock_path)
+        if pid is None or pid == os.getpid():
+            handle.close()
+            return None
+        log.warning("taking over single-instance lock from stale holder pid %d", pid)
+        _terminate(pid)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
     return handle
 
 
@@ -131,7 +185,7 @@ def run(cfg: Config, *, once: bool = False) -> int:
     if not once:
         lock = _acquire_single_instance_lock()
         if lock is None:
-            log.error("another aw-watcher-ax instance is already running; exiting")
+            log.error("could not take the single-instance lock (holder won't release); exiting")
             return 5
 
     if not _wait_for_permission(once):

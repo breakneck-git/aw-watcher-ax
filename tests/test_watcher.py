@@ -399,11 +399,12 @@ def test_daemon_loop_blocks_when_permission_revoked_and_recovers(
     assert poll_calls["n"] == 1
 
 
-def test_single_instance_lock_blocks_second_holder(tmp_path) -> None:
+def test_single_instance_lock_refuses_to_take_over_self(tmp_path) -> None:
     lock = tmp_path / "w.lock"
     fd1 = watcher._acquire_single_instance_lock(lock)
     assert fd1 is not None
-    # A second acquisition while the first is held must fail.
+    # The recorded holder is THIS process — newest-wins must not terminate self,
+    # so a same-process second acquisition fails rather than killing the runner.
     assert watcher._acquire_single_instance_lock(lock) is None
     # Releasing the first lets a later acquisition succeed again.
     fd1.close()
@@ -412,11 +413,40 @@ def test_single_instance_lock_blocks_second_holder(tmp_path) -> None:
     fd2.close()
 
 
-def test_run_daemon_exits_5_when_another_instance_running(
+def test_acquire_takes_over_from_another_process(tmp_path) -> None:
+    # Newest wins: a stale/hung holder in ANOTHER process must be terminated and
+    # the lock taken over, so a freshly launched daemon is never blocked by an
+    # old one left running.
+    import subprocess
+    import sys
+
+    lock = tmp_path / "w.lock"
+    code = (
+        "import fcntl, os, sys, time\n"
+        f"f = open({str(lock)!r}, 'r+' if os.path.exists({str(lock)!r}) else 'w+')\n"
+        "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "f.seek(0); f.truncate(); f.write(str(os.getpid())); f.flush()\n"
+        "sys.stdout.write('locked\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "locked"  # holder owns the lock now
+        handle = watcher._acquire_single_instance_lock(lock)
+        assert handle is not None  # we took over
+        holder.wait(timeout=5)  # the stale holder was terminated
+        assert holder.returncode is not None
+        handle.close()
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+
+
+def test_run_daemon_exits_5_when_lock_cannot_be_taken(
     monkeypatch: pytest.MonkeyPatch, cfg: Config, requests_mock: MagicMock
 ) -> None:
-    # Simulate another daemon already holding the lock; run() must refuse to
-    # start a second instance and return exit code 5 without polling.
+    # The lock is held by THIS process (newest-wins won't self-terminate), so
+    # run() can't take it: it must return exit code 5 without polling.
     held = watcher._acquire_single_instance_lock(watcher._LOCK_PATH)
     assert held is not None
     polled = {"n": 0}
