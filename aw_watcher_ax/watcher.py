@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import socket
+import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,9 +22,13 @@ _BUCKET_PREFIX = "aw-watcher-ax"
 _BUCKET_TYPE = "currentwindow"
 _PERMISSION_RETRY_SEC = 30
 _HOSTNAME = socket.gethostname()  # constant for the process; the bucket id derives from it
-_LOCK_PATH = Path.home() / "Library" / "Caches" / "aw-watcher-ax" / "watcher.lock"
+# Lock lives under Application Support, NOT Caches: macOS purges ~/Library/Caches
+# under disk pressure, and a lock file deleted out from under a live holder lets
+# a second instance create a fresh inode and flock it independently — both would
+# then run. Application Support is not auto-purged.
+_LOCK_PATH = Path.home() / "Library" / "Application Support" / "aw-watcher-ax" / "watcher.lock"
 _TAKEOVER_TICK_SEC = 0.1
-_TAKEOVER_TICKS = 30  # ~3s for a terminated holder to exit and release the lock
+_TAKEOVER_TICKS = 30  # ~3s per signal for a terminated holder to release the lock
 
 
 def _read_lock_pid(lock_path: Path) -> int | None:
@@ -37,22 +42,45 @@ def _read_lock_pid(lock_path: Path) -> int | None:
         return None
 
 
-def _terminate(pid: int) -> None:
-    """Stop a stale lock holder: SIGTERM, then SIGKILL if it lingers."""
+def _is_watcher_process(pid: int) -> bool:
+    """True if `pid`'s command line looks like an aw-watcher-ax process.
+
+    Guards the takeover signal against a recycled PID: the lock file records a
+    PID, but by the time we read it that number may belong to an unrelated
+    process. Only signal a PID we can confirm is one of ours.
+    """
     try:
-        os.kill(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    for _ in range(_TAKEOVER_TICKS):
-        time.sleep(_TAKEOVER_TICK_SEC)
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "aw-watcher-ax" in out.stdout
+
+
+def _take_over(handle: IO[str], pid: int) -> bool:
+    """Evict stale holder `pid` and acquire `handle`'s flock. Returns success.
+
+    SIGTERM first; if the holder is still alive after the grace window, re-check
+    it is still our watcher (PID reuse) before escalating to SIGKILL.
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return  # gone
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+        for _ in range(_TAKEOVER_TICKS):
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError:
+                time.sleep(_TAKEOVER_TICK_SEC)
+        if not _is_watcher_process(pid):
+            return False  # gone or recycled — don't escalate
+    return False
 
 
 def _acquire_single_instance_lock(lock_path: Path | None = None) -> IO[str] | None:
@@ -63,13 +91,13 @@ def _acquire_single_instance_lock(lock_path: Path | None = None) -> IO[str] | No
     wrong default: a stale or hung daemon (one left running with pre-update
     code) would then keep a freshly launched, current-code daemon from starting,
     and the old process would go on emitting garbage while merely "running". So
-    if the lock is held, terminate the recorded holder and take over. The holder
-    writes its PID into the lock file; we read it, signal it, and acquire once
-    the kernel releases the lock on its death (flock is released even on
-    SIGKILL, so a crash never leaves a stale lock). Returns the open handle
-    (keep it alive for the process lifetime), or None if the lock still can't be
-    taken — e.g. the holder is this same process (never self-terminate) or it
-    refuses to die.
+    if the lock is held, evict the recorded holder and take over. The holder
+    writes its PID into the lock file; we read it, confirm it is one of ours,
+    signal it, and acquire once the kernel releases the lock on its death (flock
+    is released even on SIGKILL, so a crash never leaves a stale lock). Returns
+    the open handle (keep it alive for the process lifetime), or None if the
+    lock still can't be taken — e.g. the holder is this same process (never
+    self-terminate), is not ours (recycled PID), or refuses to die.
     """
     # Resolve _LOCK_PATH at call time (not as a default arg) so tests can
     # redirect it and the daemon picks up the module-level value.
@@ -81,17 +109,14 @@ def _acquire_single_instance_lock(lock_path: Path | None = None) -> IO[str] | No
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        # Held by another instance — newest wins: terminate it and take over,
-        # unless the holder is our own process (don't kill the runner).
+        # Held — newest wins: evict the holder and take over, unless it is our
+        # own process (don't kill the runner) or a recycled, non-watcher PID.
         pid = _read_lock_pid(lock_path)
-        if pid is None or pid == os.getpid():
+        if pid is None or pid == os.getpid() or not _is_watcher_process(pid):
             handle.close()
             return None
         log.warning("taking over single-instance lock from stale holder pid %d", pid)
-        _terminate(pid)
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        if not _take_over(handle, pid):
             handle.close()
             return None
     handle.seek(0)

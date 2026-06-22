@@ -413,6 +413,21 @@ def test_single_instance_lock_refuses_to_take_over_self(tmp_path) -> None:
     fd2.close()
 
 
+# A lock-holder subprocess. The leading marker makes its `ps` command line
+# match _is_watcher_process; drop the marker to simulate an unrelated process
+# that happens to hold a recycled PID written into the lock file.
+def _holder_code(lock, *, watcher_marker: bool) -> str:
+    marker = "# aw-watcher-ax\n" if watcher_marker else "# unrelated process\n"
+    return (
+        marker + "import fcntl, os, sys, time\n"
+        f"f = open({str(lock)!r}, 'r+' if os.path.exists({str(lock)!r}) else 'w+')\n"
+        "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "f.seek(0); f.truncate(); f.write(str(os.getpid())); f.flush()\n"
+        "sys.stdout.write('locked\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+
+
 def test_acquire_takes_over_from_another_process(tmp_path) -> None:
     # Newest wins: a stale/hung holder in ANOTHER process must be terminated and
     # the lock taken over, so a freshly launched daemon is never blocked by an
@@ -421,15 +436,11 @@ def test_acquire_takes_over_from_another_process(tmp_path) -> None:
     import sys
 
     lock = tmp_path / "w.lock"
-    code = (
-        "import fcntl, os, sys, time\n"
-        f"f = open({str(lock)!r}, 'r+' if os.path.exists({str(lock)!r}) else 'w+')\n"
-        "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-        "f.seek(0); f.truncate(); f.write(str(os.getpid())); f.flush()\n"
-        "sys.stdout.write('locked\\n'); sys.stdout.flush()\n"
-        "time.sleep(60)\n"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _holder_code(lock, watcher_marker=True)],
+        stdout=subprocess.PIPE,
+        text=True,
     )
-    holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
     try:
         assert holder.stdout.readline().strip() == "locked"  # holder owns the lock now
         handle = watcher._acquire_single_instance_lock(lock)
@@ -440,6 +451,26 @@ def test_acquire_takes_over_from_another_process(tmp_path) -> None:
     finally:
         if holder.poll() is None:
             holder.kill()
+
+
+def test_acquire_does_not_kill_non_watcher_holder(tmp_path) -> None:
+    # A recycled PID written into the lock file may belong to an unrelated
+    # process. Never signal it: if the holder is not one of ours, give up.
+    import subprocess
+    import sys
+
+    lock = tmp_path / "w.lock"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _holder_code(lock, watcher_marker=False)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        assert watcher._acquire_single_instance_lock(lock) is None  # refused to take over
+        assert holder.poll() is None  # the unrelated holder was NOT killed
+    finally:
+        holder.kill()
 
 
 def test_run_daemon_exits_5_when_lock_cannot_be_taken(
