@@ -35,6 +35,14 @@ def _grant_permission(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(watcher, "check_accessibility_permission", lambda *, prompt: True)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_lock(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    # Point the single-instance lock at a per-test temp path so daemon-mode
+    # tests acquire a real (uncontended) flock instead of fighting the live
+    # daemon or each other.
+    monkeypatch.setattr(watcher, "_LOCK_PATH", tmp_path / "watcher.lock")
+
+
 def test_once_mode_emits_heartbeat_for_monitored_app(
     monkeypatch: pytest.MonkeyPatch, cfg: Config, requests_mock: MagicMock
 ) -> None:
@@ -389,3 +397,49 @@ def test_daemon_loop_blocks_when_permission_revoked_and_recovers(
         watcher.run(cfg, once=False)
 
     assert poll_calls["n"] == 1
+
+
+def test_single_instance_lock_blocks_second_holder(tmp_path) -> None:
+    lock = tmp_path / "w.lock"
+    fd1 = watcher._acquire_single_instance_lock(lock)
+    assert fd1 is not None
+    # A second acquisition while the first is held must fail.
+    assert watcher._acquire_single_instance_lock(lock) is None
+    # Releasing the first lets a later acquisition succeed again.
+    fd1.close()
+    fd2 = watcher._acquire_single_instance_lock(lock)
+    assert fd2 is not None
+    fd2.close()
+
+
+def test_run_daemon_exits_5_when_another_instance_running(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config, requests_mock: MagicMock
+) -> None:
+    # Simulate another daemon already holding the lock; run() must refuse to
+    # start a second instance and return exit code 5 without polling.
+    held = watcher._acquire_single_instance_lock(watcher._LOCK_PATH)
+    assert held is not None
+    polled = {"n": 0}
+
+    def count_poll(*_a, **_k):
+        polled["n"] += 1
+
+    monkeypatch.setattr(watcher, "_poll_once", count_poll)
+    try:
+        assert watcher.run(cfg, once=False) == 5
+    finally:
+        held.close()
+    assert polled["n"] == 0
+
+
+def test_run_once_does_not_take_single_instance_lock(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config, requests_mock: MagicMock
+) -> None:
+    # A --once smoke test must run even while the daemon holds the lock.
+    held = watcher._acquire_single_instance_lock(watcher._LOCK_PATH)
+    assert held is not None
+    monkeypatch.setattr(watcher, "get_focused_app", lambda: None)
+    try:
+        assert watcher.run(cfg, once=True) == 0
+    finally:
+        held.close()

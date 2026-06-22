@@ -1,7 +1,10 @@
+import fcntl
 import logging
 import socket
 import time
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import IO
 
 import requests
 from requests import HTTPError, RequestException
@@ -16,6 +19,32 @@ _BUCKET_PREFIX = "aw-watcher-ax"
 _BUCKET_TYPE = "currentwindow"
 _PERMISSION_RETRY_SEC = 30
 _HOSTNAME = socket.gethostname()  # constant for the process; the bucket id derives from it
+_LOCK_PATH = Path.home() / "Library" / "Caches" / "aw-watcher-ax" / "watcher.lock"
+
+
+def _acquire_single_instance_lock(lock_path: Path | None = None) -> IO[str] | None:
+    """Take an exclusive flock so only one daemon writes to the bucket.
+
+    A duplicate instance (e.g. the .app double-launched alongside the launchd
+    agent) would post a second, independent heartbeat series to the same
+    bucket — and a long-lived copy keeps running stale in-memory code after the
+    venv is updated, silently corrupting the data. flock is released by the
+    kernel when the holder dies (even on SIGKILL), so a crashed daemon never
+    leaves a stale lock. Returns the open handle (keep it alive for the process
+    lifetime) on success, or None if another instance already holds the lock.
+    """
+    # Resolve _LOCK_PATH at call time (not as a default arg) so tests can
+    # redirect it and the daemon picks up the module-level value.
+    if lock_path is None:
+        lock_path = _LOCK_PATH
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
 
 
 def _bucket_id() -> str:
@@ -95,6 +124,16 @@ def _wait_for_permission(once: bool) -> bool:
 
 
 def run(cfg: Config, *, once: bool = False) -> int:
+    # Daemon mode: refuse to start if another instance is already running, so a
+    # stray duplicate can't post a competing heartbeat series to the bucket.
+    # --once is a transient smoke test and intentionally skips the lock so it
+    # can run alongside the daemon. `lock` is bound for the process lifetime.
+    if not once:
+        lock = _acquire_single_instance_lock()
+        if lock is None:
+            log.error("another aw-watcher-ax instance is already running; exiting")
+            return 5
+
     if not _wait_for_permission(once):
         return 3
 
