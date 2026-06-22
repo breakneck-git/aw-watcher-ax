@@ -85,9 +85,19 @@ mkdir -p "$HOME/Applications"
 # byte-for-byte, keeping the cdhash — and the grant — stable across reinstalls.
 TRAMPOLINE_HASH_FILE="$VENV_DIR/.trampoline.sha256"  # outside the bundle, not codesigned
 SRC_HASH="$(shasum -a 256 "$TRAMPOLINE_SRC" | awk '{print $1}')"
+# Capture the OLD designated requirement: that is exactly what TCC checks, so a
+# re-grant is needed iff it changes (ad-hoc cdhash → different cdhash, or a
+# switch between ad-hoc and a signing cert). A cert-signed rebuild keeps the
+# same requirement even when the cdhash changes, so the grant survives.
+OLD_REQ=""
 OLD_CDHASH=""
+HAD_BUNDLE=""
 STASHED_BIN=""
 if [ -x "$APP_BIN" ]; then
+    HAD_BUNDLE=1
+    # Ad-hoc bundles expose no designated requirement, so also keep the cdhash:
+    # for ad-hoc the grant is cdhash-bound, for cert-signed it is requirement-bound.
+    OLD_REQ="$(codesign -d --requirements - "$APP_DIR" 2>/dev/null | sed -n 's/^designated => //p')"
     OLD_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | sed -n 's/^CDHash=//p')"
     if [ -f "$TRAMPOLINE_HASH_FILE" ] && [ "$(cat "$TRAMPOLINE_HASH_FILE")" = "$SRC_HASH" ]; then
         STASHED_BIN="$(mktemp)"
@@ -116,18 +126,42 @@ fi
 chmod +x "$APP_BIN"
 printf '%s' "$SRC_HASH" > "$TRAMPOLINE_HASH_FILE"
 
-echo "Ad-hoc codesigning app bundle..."
-codesign --force --deep --sign - "$APP_DIR"
+# Prefer a stable self-signed code-signing identity if one is installed: then
+# TCC keys the grant on the certificate (designated requirement), so it survives
+# every rebuild — toolchain bumps AND trampoline.c edits. Fall back to ad-hoc
+# (cdhash-bound grant) when no such identity exists, e.g. a fresh machine.
+# Create the identity once; see README "Re-granting after a toolchain update".
+SIGN_IDENTITY="aw-watcher-ax Code Signing"
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+    echo "Codesigning with stable identity '$SIGN_IDENTITY' (grant survives rebuilds)..."
+    codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"
+else
+    echo "Ad-hoc codesigning app bundle (no stable signing identity found)..."
+    codesign --force --deep --sign - "$APP_DIR"
+fi
 
+NEW_REQ="$(codesign -d --requirements - "$APP_DIR" 2>/dev/null | sed -n 's/^designated => //p')"
 NEW_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | sed -n 's/^CDHash=//p')"
-if [ -n "$OLD_CDHASH" ] && [ "$OLD_CDHASH" != "$NEW_CDHASH" ]; then
+# Re-grant is needed iff the binary no longer satisfies the prior grant: for a
+# cert-signed old bundle compare the requirement; for an ad-hoc old bundle (no
+# requirement) compare the cdhash.
+NEEDS_REGRANT=0
+if [ -n "$HAD_BUNDLE" ]; then
+    if [ -n "$OLD_REQ" ]; then
+        [ "$OLD_REQ" != "$NEW_REQ" ] && NEEDS_REGRANT=1
+    else
+        [ "$OLD_CDHASH" != "$NEW_CDHASH" ] && NEEDS_REGRANT=1
+    fi
+fi
+if [ "$NEEDS_REGRANT" = 1 ]; then
     echo ""
-    echo "⚠️  App code identity changed:"
-    echo "      $OLD_CDHASH → $NEW_CDHASH"
-    echo "    macOS treats this as a new binary, so the Accessibility grant will"
-    echo "    NOT carry over. Re-enable 'aw-watcher-ax' in System Settings →"
-    echo "    Privacy & Security → Accessibility (toggle off/on, or remove + re-add)."
-    echo "    The watcher waits for the grant and resumes automatically once given."
+    echo "⚠️  App code identity changed — the Accessibility grant will NOT carry over."
+    echo "    Re-enable 'aw-watcher-ax' in System Settings → Privacy & Security →"
+    echo "    Accessibility (toggle off/on, or remove + re-add). The watcher waits"
+    echo "    for the grant and resumes automatically once given."
+    if printf '%s' "$NEW_REQ" | grep -q "certificate leaf"; then
+        echo "    (This is a one-time re-grant: future rebuilds keep this identity.)"
+    fi
     echo ""
 fi
 

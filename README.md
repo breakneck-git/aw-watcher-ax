@@ -49,11 +49,25 @@ telling you to re-enable `aw-watcher-ax` in System Settings (toggle off/on, or
 remove and re-add). A `tccutil reset Accessibility com.aw-watcher-ax` followed
 by a reload gives the cleanest re-prompt.
 
-For a grant that survives *even* a `trampoline.c` change, sign the bundle with a
-stable self-signed code-signing certificate instead of ad-hoc (`codesign --sign
-"<cert>"`): TCC then keys on the certificate-based designated requirement rather
-than the raw cdhash. This needs a one-time cert in your keychain and is not set
-up by default.
+#### Never re-grant again (recommended): sign with a stable certificate
+
+For a grant that survives **everything** — toolchain bumps *and* `trampoline.c`
+edits — sign the bundle with a stable self-signed code-signing certificate
+instead of ad-hoc. TCC then keys the grant on the certificate-based *designated
+requirement* (`identifier "com.aw-watcher-ax" and certificate leaf = H"…"`),
+which any future build signed with the same cert satisfies regardless of cdhash.
+
+```bash
+./scripts/create-signing-cert.sh   # one-time: makes a ~50y self-signed identity
+./install.sh                        # now signs with it automatically
+```
+
+`install.sh` uses the identity if present and falls back to ad-hoc otherwise.
+After the first cert-signed install the code identity changes once, so re-grant
+Accessibility one final time (`install.sh` warns you) — it then sticks for good.
+The cert is self-signed and untrusted, which is fine: `codesign` signs with it
+anyway and TCC matches the certificate leaf, not a trust chain. If the login
+keychain is wiped, re-run the script and re-grant once.
 
 ## Configure
 
