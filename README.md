@@ -31,6 +31,30 @@ The watcher exists as a real `.app` bundle precisely so macOS TCC tracks a stabl
 
 No restart needed after granting — the watcher polls the trust bit and resumes automatically.
 
+### Re-granting after a toolchain update
+
+The Accessibility grant is bound to the bundle's **cdhash** (its ad-hoc code
+identity). That cdhash is deterministic for a fixed *source + toolchain*, so it
+survives Python upgrades and venv rebuilds — but **a new Xcode / Command Line
+Tools version compiles the trampoline to different bytes**, which would change
+the cdhash and silently void the grant (the watcher then logs `Accessibility
+permission not granted` and collects nothing).
+
+To avoid that, `install.sh` rebuilds the trampoline **only when `trampoline.c`
+actually changed** (tracked by content hash in `.venv/.trampoline.sha256`);
+otherwise it reuses the existing binary byte-for-byte, keeping the cdhash — and
+your grant — stable across reinstalls and toolchain updates. If `trampoline.c`
+*does* change, the cdhash necessarily changes and `install.sh` prints a warning
+telling you to re-enable `aw-watcher-ax` in System Settings (toggle off/on, or
+remove and re-add). A `tccutil reset Accessibility com.aw-watcher-ax` followed
+by a reload gives the cleanest re-prompt.
+
+For a grant that survives *even* a `trampoline.c` change, sign the bundle with a
+stable self-signed code-signing certificate instead of ad-hoc (`codesign --sign
+"<cert>"`): TCC then keys on the certificate-based designated requirement rather
+than the raw cdhash. This needs a one-time cert in your keychain and is not set
+up by default.
+
 ## Configure
 
 Edit `~/.config/aw-watcher-ax/config.toml`. See `config.toml.example` for the full schema and defaults.

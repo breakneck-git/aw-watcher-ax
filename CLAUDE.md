@@ -82,6 +82,8 @@ Two invariants make the cdhash stable across reinstalls:
 1. `install.sh` compiles the trampoline to the same absolute path (`$APP_BIN`), and ld64 embeds the output filename in the symbol table — different output paths produce different bytes. Don't change the compile target path.
 2. ld64's default `LC_UUID` is a content hash, so the UUID — and thus the binary bytes and the cdhash — are deterministic for a fixed source + toolchain. Don't pass `-Wl,-no_uuid`: modern dyld refuses to load Mach-O binaries without an `LC_UUID` load command (`dyld[…]: missing LC_UUID load command` → SIGABRT at startup).
 
+"For a fixed *toolchain*" is the catch: a new Xcode/CLT version compiles different bytes → different cdhash → the Accessibility grant silently voids on the next reinstall. So `install.sh` rebuilds the trampoline **only when `trampoline.c`'s content hash changed** (stored in `.venv/.trampoline.sha256`); otherwise it stashes and restores the existing binary byte-for-byte, keeping the cdhash stable across reinstalls and toolchain updates. Don't revert this to an unconditional `clang` recompile — that's what made every toolchain bump require a manual re-grant. When the cdhash does change (a real `trampoline.c` edit), install.sh diffs old vs new and warns the user to re-grant.
+
 Don't change install.sh to launch the venv binary directly, and don't rewrite the trampoline to plain `execv` — the daemon will appear to start, but on the next Python upgrade or venv rebuild Accessibility will silently fall off and the watcher will collect nothing.
 
 ### Permission handling

@@ -75,6 +75,26 @@ fi
 
 echo "Installing app bundle to $APP_DIR..."
 mkdir -p "$HOME/Applications"
+
+# The Accessibility grant is tied to the bundle's cdhash. ld64 yields a
+# bit-identical trampoline only for a fixed source + toolchain, so recompiling
+# after an Xcode/CLT update changes the cdhash and silently voids the grant —
+# the watcher then sits in "permission denied" collecting nothing. Avoid that:
+# rebuild the trampoline ONLY when its source actually changed (content hash,
+# not mtime — git checkouts churn mtimes). Otherwise reuse the existing binary
+# byte-for-byte, keeping the cdhash — and the grant — stable across reinstalls.
+TRAMPOLINE_HASH_FILE="$VENV_DIR/.trampoline.sha256"  # outside the bundle, not codesigned
+SRC_HASH="$(shasum -a 256 "$TRAMPOLINE_SRC" | awk '{print $1}')"
+OLD_CDHASH=""
+STASHED_BIN=""
+if [ -x "$APP_BIN" ]; then
+    OLD_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | sed -n 's/^CDHash=//p')"
+    if [ -f "$TRAMPOLINE_HASH_FILE" ] && [ "$(cat "$TRAMPOLINE_HASH_FILE")" = "$SRC_HASH" ]; then
+        STASHED_BIN="$(mktemp)"
+        cp "$APP_BIN" "$STASHED_BIN"
+    fi
+fi
+
 rm -rf "$APP_DIR"
 cp -R "$APP_TEMPLATE" "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
@@ -83,17 +103,33 @@ rm -f "$APP_DIR/Contents/MacOS/.gitkeep" "$APP_DIR/Contents/Resources/.gitkeep"
 # Record the venv launcher path for the trampoline to read at runtime.
 printf '%s\n' "$VENV_DIR/bin/aw-watcher-ax" > "$APP_TARGET_FILE"
 
-# Compile the Mach-O trampoline. ld64 defaults to a content-hash LC_UUID,
-# so identical source + toolchain yield a bit-identical binary across
-# reinstalls. That keeps the .app bundle's cdhash stable and preserves
-# the user's Accessibility grant. We intentionally do NOT pass -no_uuid:
-# modern dyld refuses to load Mach-O binaries missing LC_UUID.
-echo "Compiling launcher trampoline..."
-clang -O2 -Wall -o "$APP_BIN" "$TRAMPOLINE_SRC"
+if [ -n "$STASHED_BIN" ]; then
+    echo "Reusing existing trampoline (source unchanged) to preserve the Accessibility grant..."
+    cp "$STASHED_BIN" "$APP_BIN"
+    rm -f "$STASHED_BIN"
+else
+    # We intentionally do NOT pass -no_uuid: modern dyld refuses to load a
+    # Mach-O missing LC_UUID (SIGABRT at startup).
+    echo "Compiling launcher trampoline..."
+    clang -O2 -Wall -o "$APP_BIN" "$TRAMPOLINE_SRC"
+fi
 chmod +x "$APP_BIN"
+printf '%s' "$SRC_HASH" > "$TRAMPOLINE_HASH_FILE"
 
 echo "Ad-hoc codesigning app bundle..."
 codesign --force --deep --sign - "$APP_DIR"
+
+NEW_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | sed -n 's/^CDHash=//p')"
+if [ -n "$OLD_CDHASH" ] && [ "$OLD_CDHASH" != "$NEW_CDHASH" ]; then
+    echo ""
+    echo "⚠️  App code identity changed:"
+    echo "      $OLD_CDHASH → $NEW_CDHASH"
+    echo "    macOS treats this as a new binary, so the Accessibility grant will"
+    echo "    NOT carry over. Re-enable 'aw-watcher-ax' in System Settings →"
+    echo "    Privacy & Security → Accessibility (toggle off/on, or remove + re-add)."
+    echo "    The watcher waits for the grant and resumes automatically once given."
+    echo ""
+fi
 
 echo "Installing launchd service..."
 mkdir -p "$LOG_DIR"
