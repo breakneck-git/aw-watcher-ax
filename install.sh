@@ -28,6 +28,17 @@ if [ -f "$PLIST_DST" ]; then
     launchctl unload "$PLIST_DST" 2>/dev/null || true
 fi
 
+# `launchctl unload` only stops the LaunchAgent. A copy launched outside launchd
+# (e.g. the .app double-clicked, registered as application.com.aw-watcher-ax.*)
+# keeps running — and because the venv is an editable install, a long-lived
+# stray executes stale in-memory code after this reinstall updates the source,
+# silently posting a competing heartbeat series to the bucket. That is exactly
+# how "0" kept landing in the time log. Kill every instance so only the freshly
+# loaded daemon survives. flock alone can't fix this: a pre-update stray holds
+# no lock (old code) yet still runs, or holds the lock and blocks the new one.
+pkill -f "$APP_BIN" 2>/dev/null || true
+pkill -f "$VENV_DIR/bin/aw-watcher-ax" 2>/dev/null || true
+
 PYTHON_BIN=""
 for candidate in python3.11 python3.12 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
