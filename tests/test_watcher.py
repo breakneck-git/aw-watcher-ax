@@ -1,9 +1,20 @@
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from aw_watcher_ax import watcher
 from aw_watcher_ax.config import AppConfig, Config
+
+
+def _fake_ps(stdout=None, exc=None):
+    def run(*_a, **_k):
+        if exc is not None:
+            raise exc
+        return SimpleNamespace(stdout=stdout)
+
+    return run
 
 
 @pytest.fixture
@@ -160,13 +171,18 @@ def test_poll_once_recreates_bucket_and_retries_on_heartbeat_404(
     # rather than 404ing silently forever.
     import requests as real_requests
 
-    urls: list[str] = []
+    calls: list[tuple[str, object]] = []  # (kind, json-body)
 
-    def post(url: str, **_kwargs):
-        urls.append(url)
-        if "/heartbeat" in url:
+    def post(url: str, **kwargs):
+        kind = (
+            "heartbeat"
+            if "/heartbeat" in url
+            else ("bucket" if url.endswith("/buckets/" + watcher._bucket_id()) else "other")
+        )
+        calls.append((kind, kwargs.get("json")))
+        if kind == "heartbeat":
             resp = MagicMock()
-            if sum(1 for u in urls if "/heartbeat" in u) == 1:
+            if sum(1 for k, _ in calls if k == "heartbeat") == 1:
                 err = real_requests.HTTPError("404 Not Found")
                 err.response = MagicMock(status_code=404)
                 resp.raise_for_status.side_effect = err
@@ -185,10 +201,18 @@ def test_poll_once_recreates_bucket_and_retries_on_heartbeat_404(
 
     assert watcher.run(cfg, once=True) == 0
 
-    heartbeats = [u for u in urls if "/heartbeat" in u]
-    bucket_creates = [u for u in urls if u.endswith("/buckets/" + watcher._bucket_id())]
-    assert len(heartbeats) == 2  # initial 404 + retry after recreation
-    assert len(bucket_creates) == 2  # startup + recovery
+    kinds = [k for k, _ in calls]
+    assert kinds.count("heartbeat") == 2  # initial 404 + retry after recreation
+    assert kinds.count("bucket") == 2  # startup + recovery
+    # Recreation must happen BETWEEN the two heartbeats, not after.
+    hb_idx = [i for i, k in enumerate(kinds) if k == "heartbeat"]
+    bk_idx = [i for i, k in enumerate(kinds) if k == "bucket"]
+    assert hb_idx[0] < bk_idx[1] < hb_idx[1]
+    # The retried heartbeat must carry the SAME payload as the first.
+    expected = {"app": "Claude", "context": "chat title"}
+    hb_bodies = [b for k, b in calls if k == "heartbeat"]
+    assert hb_bodies[1]["data"] == expected
+    assert hb_bodies[0]["data"] == expected
 
 
 def test_poll_once_does_not_retry_non_404_heartbeat_error(
@@ -206,6 +230,40 @@ def test_poll_once_does_not_retry_non_404_heartbeat_error(
             resp = MagicMock()
             err = real_requests.HTTPError("500 Server Error")
             err.response = MagicMock(status_code=500)
+            resp.raise_for_status.side_effect = err
+            return resp
+        return MagicMock(status_code=200, raise_for_status=MagicMock())
+
+    mock = MagicMock()
+    mock.post.side_effect = post
+    monkeypatch.setattr(watcher, "requests", mock)
+    monkeypatch.setattr(
+        watcher, "get_focused_app", lambda: (1234, "com.anthropic.claudefordesktop")
+    )
+    monkeypatch.setattr(watcher, "extract_context", lambda *_a, **_k: "chat title")
+
+    with pytest.raises(real_requests.HTTPError):
+        watcher.run(cfg, once=True)
+
+    bucket_creates = [u for u in urls if u.endswith("/buckets/" + watcher._bucket_id())]
+    assert len(bucket_creates) == 1  # startup only, no recovery attempt
+
+
+def test_poll_once_reraises_404_with_no_response(
+    monkeypatch: pytest.MonkeyPatch, cfg: Config
+) -> None:
+    # An HTTPError can carry no .response. That must propagate (re-raised in
+    # --once), NOT be mistaken for a missing-bucket 404 and trigger recreation.
+    import requests as real_requests
+
+    urls: list[str] = []
+
+    def post(url: str, **_kwargs):
+        urls.append(url)
+        if "/heartbeat" in url:
+            resp = MagicMock()
+            err = real_requests.HTTPError("no response attached")
+            err.response = None
             resp.raise_for_status.side_effect = err
             return resp
         return MagicMock(status_code=200, raise_for_status=MagicMock())
@@ -504,3 +562,141 @@ def test_run_once_does_not_take_single_instance_lock(
         assert watcher.run(cfg, once=True) == 0
     finally:
         held.close()
+
+
+# ---------- _is_watcher_process (PID-reuse guard) ----------
+
+
+def test_is_watcher_process_matches_python_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        watcher.subprocess,
+        "run",
+        _fake_ps(stdout="/opt/py/Python /opt/py/Python /Users/x/.venv/bin/aw-watcher-ax\n"),
+    )
+    assert watcher._is_watcher_process(123) is True
+
+
+def test_is_watcher_process_rejects_tail_over_logfile(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A recycled PID owned by `tail -f .../aw-watcher-ax/watcher.log` must NOT be
+    # treated as the daemon just because the path contains "aw-watcher-ax".
+    monkeypatch.setattr(
+        watcher.subprocess,
+        "run",
+        _fake_ps(stdout="tail tail -f /Users/x/Library/Logs/aw-watcher-ax/watcher.log\n"),
+    )
+    assert watcher._is_watcher_process(123) is False
+
+
+def test_is_watcher_process_rejects_pager_over_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        watcher.subprocess,
+        "run",
+        _fake_ps(stdout="less less /Users/x/.venv/bin/aw-watcher-ax\n"),
+    )
+    assert watcher._is_watcher_process(123) is False
+
+
+def test_is_watcher_process_false_when_name_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        watcher.subprocess, "run", _fake_ps(stdout="python3.11 python3.11 -c pass\n")
+    )
+    assert watcher._is_watcher_process(123) is False
+
+
+def test_is_watcher_process_false_on_ps_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(watcher.subprocess, "run", _fake_ps(exc=OSError("boom")))
+    assert watcher._is_watcher_process(123) is False
+
+
+def test_is_watcher_process_false_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        watcher.subprocess, "run", _fake_ps(exc=subprocess.TimeoutExpired(cmd="ps", timeout=5))
+    )
+    assert watcher._is_watcher_process(123) is False
+
+
+# ---------- _read_lock_pid ----------
+
+
+def test_read_lock_pid_missing_file(tmp_path) -> None:
+    assert watcher._read_lock_pid(tmp_path / "nope.lock") is None
+
+
+def test_read_lock_pid_empty(tmp_path) -> None:
+    p = tmp_path / "l"
+    p.write_text("")
+    assert watcher._read_lock_pid(p) is None
+
+
+def test_read_lock_pid_garbage(tmp_path) -> None:
+    p = tmp_path / "l"
+    p.write_text("not-a-pid")
+    assert watcher._read_lock_pid(p) is None
+
+
+def test_read_lock_pid_valid(tmp_path) -> None:
+    p = tmp_path / "l"
+    p.write_text("  4321\n")
+    assert watcher._read_lock_pid(p) == 4321
+
+
+# ---------- _take_over escalation / failure ----------
+
+
+def test_acquire_escalates_to_sigkill_when_sigterm_ignored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # Holder ignores SIGTERM; takeover must escalate to SIGKILL and still win.
+    monkeypatch.setattr(watcher, "_TAKEOVER_TICKS", 3)  # ~0.3s grace, keep test fast
+    lock = tmp_path / "w.lock"
+    code = (
+        "# aw-watcher-ax\n"
+        "import fcntl, os, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"f = open({str(lock)!r}, 'w+')\n"
+        "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "f.seek(0); f.truncate(); f.write(str(os.getpid())); f.flush()\n"
+        "sys.stdout.write('locked\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    holder = subprocess.Popen(
+        [__import__("sys").executable, "-c", code], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        handle = watcher._acquire_single_instance_lock(lock)
+        assert handle is not None  # SIGKILL won
+        holder.wait(timeout=5)
+        assert holder.returncode is not None
+        handle.close()
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+
+
+def test_acquire_returns_none_when_holder_will_not_die(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # A confirmed-watcher holder that survives all signals (here: os.kill no-op'd)
+    # → _take_over fails → acquisition returns None (run() maps to exit 5).
+    monkeypatch.setattr(watcher, "_TAKEOVER_TICKS", 2)
+    monkeypatch.setattr(watcher.os, "kill", lambda *_a, **_k: None)  # signals do nothing
+    lock = tmp_path / "w.lock"
+    code = (
+        "# aw-watcher-ax\n"
+        "import fcntl, os, sys, time\n"
+        f"f = open({str(lock)!r}, 'w+')\n"
+        "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "f.seek(0); f.truncate(); f.write(str(os.getpid())); f.flush()\n"
+        "sys.stdout.write('locked\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    holder = subprocess.Popen(
+        [__import__("sys").executable, "-c", code], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        assert watcher._acquire_single_instance_lock(lock) is None
+        assert holder.poll() is None  # not actually killed (os.kill was a no-op)
+    finally:
+        holder.kill()

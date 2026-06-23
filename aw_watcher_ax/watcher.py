@@ -43,12 +43,19 @@ def _read_lock_pid(lock_path: Path) -> int | None:
 
 
 def _is_watcher_process(pid: int) -> bool:
-    """True if `pid`'s command line looks like an aw-watcher-ax process.
+    """True if `pid` is one of our daemon processes.
 
     Guards the takeover signal against a recycled PID: the lock file records a
-    PID, but by the time we read it that number may belong to an unrelated
-    process. Only signal a PID we can confirm is one of ours.
+    PID that may belong to an unrelated process by the time we read it. A bare
+    "aw-watcher-ax" substring match is too loose — the string also appears in
+    `tail … aw-watcher-ax/watcher.log`, `less .venv/bin/aw-watcher-ax`, an editor
+    over the repo, etc., any of which could hold the recycled PID. Require BOTH:
+    the launcher in the args, AND the executable being the Python interpreter the
+    venv launcher runs under (or, for a future compiled build, named
+    aw-watcher-ax) — never a pager/editor/tail merely naming the path.
     """
+    # `-o command=` alone (not combined with comm=, which macOS truncates to a
+    # ~16-char column) gives the full argv; its first token is the executable.
     try:
         out = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
@@ -58,7 +65,12 @@ def _is_watcher_process(pid: int) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return "aw-watcher-ax" in out.stdout
+    line = out.stdout.strip()
+    if "aw-watcher-ax" not in line:
+        return False
+    exe = line.split(None, 1)[0] if line else ""
+    base = exe.rsplit("/", 1)[-1]
+    return "ython" in base or base == "aw-watcher-ax"
 
 
 def _take_over(handle: IO[str], pid: int) -> bool:
@@ -111,7 +123,15 @@ def _acquire_single_instance_lock(lock_path: Path | None = None) -> IO[str] | No
     except OSError:
         # Held — newest wins: evict the holder and take over, unless it is our
         # own process (don't kill the runner) or a recycled, non-watcher PID.
+        # The holder writes its PID just *after* flocking, so on a near-
+        # simultaneous start the file can be momentarily empty; retry briefly
+        # rather than wrongly giving up (which would exit 5).
         pid = _read_lock_pid(lock_path)
+        for _ in range(_TAKEOVER_TICKS):
+            if pid is not None:
+                break
+            time.sleep(_TAKEOVER_TICK_SEC)
+            pid = _read_lock_pid(lock_path)
         if pid is None or pid == os.getpid() or not _is_watcher_process(pid):
             handle.close()
             return None

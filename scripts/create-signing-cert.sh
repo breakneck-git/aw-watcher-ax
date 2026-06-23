@@ -26,6 +26,22 @@ if security find-identity -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; the
     exit 0
 fi
 
+# macOS's /usr/bin/openssl is LibreSSL, which lacks the `-legacy` PKCS#12 option
+# we need to emit a container `security import` can read. Require a real OpenSSL
+# 3.x and fail loudly if absent (rather than dying mid-run with stderr hidden).
+OPENSSL=""
+for c in /opt/homebrew/bin/openssl /usr/local/bin/openssl openssl; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" version 2>/dev/null | grep -q "^OpenSSL 3"; then
+        OPENSSL="$c"
+        break
+    fi
+done
+if [ -z "$OPENSSL" ]; then
+    echo "Error: OpenSSL 3.x is required (system LibreSSL lacks PKCS#12 -legacy)." >&2
+    echo "  brew install openssl" >&2
+    exit 1
+fi
+
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 
@@ -43,15 +59,16 @@ extendedKeyUsage = critical, codeSigning
 CNF
 
 echo "Generating self-signed code-signing certificate (~50y)..."
-openssl req -x509 -newkey rsa:2048 -sha256 -days "$DAYS" -nodes \
+"$OPENSSL" req -x509 -newkey rsa:2048 -sha256 -days "$DAYS" -nodes \
     -keyout "$W/key.pem" -out "$W/cert.pem" -config "$W/cert.cnf" 2>/dev/null
 
 # macOS `security import` can't read OpenSSL 3.x's default PKCS#12 MAC/cipher;
 # emit a legacy (SHA1 + 3DES) container it accepts. The passphrase is transient
-# (used only to hand the key to the keychain) — not a secret.
-openssl pkcs12 -export -legacy -inkey "$W/key.pem" -in "$W/cert.pem" \
+# (used only to hand the key to the keychain) — not a secret. Let stderr through
+# so any failure here is visible rather than swallowed.
+"$OPENSSL" pkcs12 -export -legacy -inkey "$W/key.pem" -in "$W/cert.pem" \
     -name "$CERT_NAME" -out "$W/id.p12" -passout pass:transient \
-    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 2>/dev/null
+    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1
 
 # -A lets codesign use the private key without a partition-list/ACL prompt.
 echo "Importing into the login keychain..."

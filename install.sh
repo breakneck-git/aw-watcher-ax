@@ -101,6 +101,8 @@ if [ -x "$APP_BIN" ]; then
     OLD_CDHASH="$(codesign -dvvv "$APP_DIR" 2>&1 | sed -n 's/^CDHash=//p')"
     if [ -f "$TRAMPOLINE_HASH_FILE" ] && [ "$(cat "$TRAMPOLINE_HASH_FILE")" = "$SRC_HASH" ]; then
         STASHED_BIN="$(mktemp)"
+        # Clean up the stash even if a later step aborts under `set -e`.
+        trap 'rm -f "$STASHED_BIN"' EXIT
         cp "$APP_BIN" "$STASHED_BIN"
     fi
 fi

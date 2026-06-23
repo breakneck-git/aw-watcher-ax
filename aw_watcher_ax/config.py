@@ -110,6 +110,10 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     aw_base_url = data.get("aw_base_url", "http://localhost:5600")
     if not isinstance(aw_base_url, str):
         raise ValueError(f"aw_base_url must be a string, got {aw_base_url!r}")
+    # urlparse silently ignores surrounding whitespace, so a value like
+    # "http://host:5600 " would validate but then build "http://host:5600 /api/...".
+    # Strip before validating AND storing so the two always agree.
+    aw_base_url = aw_base_url.strip()
     parsed = urlparse(aw_base_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError(

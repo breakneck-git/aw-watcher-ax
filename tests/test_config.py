@@ -337,6 +337,25 @@ def test_aw_base_url_trailing_slash_normalized(tmp_path: Path) -> None:
     assert cfg.aw_base_url == "http://localhost:5600"
 
 
+def test_aw_base_url_surrounding_whitespace_stripped(tmp_path: Path) -> None:
+    # urlparse ignores surrounding whitespace when validating, so a stray space
+    # must be stripped from the stored value too — else URL building would emit
+    # "http://localhost:5600 /api/0/..." and every request would fail.
+    cfg = load_config(
+        _write(
+            tmp_path,
+            """
+        aw_base_url = "  http://localhost:5600  "
+
+        [[apps]]
+        bundle_id = "dev.zed.Zed"
+        name = "Zed"
+    """,
+        )
+    )
+    assert cfg.aw_base_url == "http://localhost:5600"
+
+
 def test_rejects_aw_base_url_without_host(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="aw_base_url"):
         load_config(
